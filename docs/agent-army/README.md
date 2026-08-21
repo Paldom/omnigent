@@ -5,11 +5,10 @@ coordinated by a loop that keeps going after you close the laptop.
 
 ![Six vendors, one loop, an approval that survives a restart](media/agent-army.gif)
 
-*Recorded against this repository — real sessions, a real Claude turn reading
-`army/state.py`, and an approval card still answerable after the server was
-SIGKILLed and restarted. One caption overstates: worktree isolation is real for
-the `army` path when `worktrees` is set in `army.toml`, and doctrine rather than
-enforcement when marshal delegates by hand. The scenario is
+*Recorded against this repository. The turn is real — polly spawns a `pi`
+sub-agent to read `army/state.py` and answers from what it found — and the
+approval card is a genuinely restored one: the server was `kill -9`'d between
+raising it and recording. The scenario is
 [`media/agent-army.scenario.yaml`](media/agent-army.scenario.yaml); full-quality
 MP4 is [`media/agent-army.mp4`](media/agent-army.mp4).*
 

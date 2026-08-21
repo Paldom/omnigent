@@ -48,11 +48,11 @@ steps:
   - zoom: reset
 
   # ── per-agent state ───────────────────────────────────
-  - zoom: { to: "[data-testid=files-panel-drawer]", scale: 1.5 }
+  - zoom: { to: "[data-testid=files-panel-drawer]", scale: 1.15 }
   - card:
       kicker: "Per agent, not global"
-      title: "Its own workspace"
-      body: "Each worker gets its own worktree, its own files, its own terminal to take over."
+      title: "Its own working copy"
+      body: "Its own checkout, its own files, its own terminal to take over."
       at: "[data-testid=files-panel-drawer]"
       side: left
       duration: 3.6
