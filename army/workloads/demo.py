@@ -28,10 +28,18 @@ class DemoWorkload:
     :param queue_path: Text file of tasks, one per line. Blank lines and lines
         starting with ``#`` are skipped, and a completed task is marked with a
         leading ``done:`` rather than deleted, so the file stays an audit trail.
-    :param implementer_agent: Agent id for the vendor that writes the change.
-    :param reviewer_agent: Agent id for the vendor that judges it. Point this
-        at a different vendor than the implementer.
+    :param implementer_agent: Agent name or id for the vendor that writes the
+        change. Names are the ones in ``GET /v1/agents``.
+    :param reviewer_agent: The vendor that judges it. Point this at a different
+        vendor than the implementer — a diff judged by the model that wrote it
+        is judged by its own blind spots.
     :param workspace: Directory the sessions run in.
+    :param host_id: Host to pin sessions to. ``None`` asks the server for its
+        first online host, which is right for a single box.
+    :param harness: Harness override for both roles. Leave unset to use each
+        agent's own. Worth setting to a headless harness on a box with no
+        working terminal — a native TUI harness needs tmux, and fails the turn
+        without it.
     """
 
     name = "demo"
@@ -39,16 +47,18 @@ class DemoWorkload:
     def __init__(
         self,
         queue_path: str = "army-queue.txt",
-        implementer_agent: str = "implementer",
-        reviewer_agent: str = "reviewer",
+        implementer_agent: str = "claude-native-ui",
+        reviewer_agent: str = "codex-native-ui",
         workspace: str | None = None,
         host_id: str | None = None,
+        harness: str | None = None,
     ) -> None:
         self.queue_path = Path(queue_path).expanduser()
         self.implementer_agent = implementer_agent
         self.reviewer_agent = reviewer_agent
         self.workspace = workspace
         self.host_id = host_id
+        self.harness = harness
         # Resolved once per process, on first use. The names in army.toml are
         # what a person writes; the API wants the ids it minted.
         self._agent_ids: dict[str, str] = {}
@@ -101,6 +111,7 @@ class DemoWorkload:
             title=title,
             workspace=self.workspace,
             host_id=self._host(omni),
+            harness=self.harness,
         )
         omni.send(
             session_id,
@@ -135,6 +146,7 @@ class DemoWorkload:
                 title=review_title,
                 workspace=self.workspace,
                 host_id=self._host(omni),
+                harness=self.harness,
             )
             omni.send(
                 reviewer_id,

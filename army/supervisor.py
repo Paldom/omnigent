@@ -240,7 +240,7 @@ class Supervisor:
         if session_id is None:
             return self._fail(run, "no session to raise the approval on", now=now)
         try:
-            approval_id = self.omni.ask(session_id, question, options, evidence=evidence)
+            approval_id = self.omni.ask(run.id, session_id, question, options, evidence=evidence)
         except OmniError as exc:
             if exc.is_transient:
                 _logger.warning("could not raise approval for run %s: %s", run.id, exc)

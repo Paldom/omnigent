@@ -180,7 +180,10 @@ class OmniClient:
         :param title: Name the session by what it is doing, not by its vendor —
             the vendor is an implementation detail that may change between
             iterations.
-        :param harness: Harness override, or ``None`` for the agent's own.
+        :param harness: Per-session harness override, or ``None`` for the
+            agent's own. Sent as ``harness_override``, which is the field the
+            server validates — a plain ``harness`` key is accepted and ignored,
+            so the session silently runs on the spec's harness instead.
         :param workspace: Working directory for the session, e.g. a worktree.
         :param host_id: Host to pin the session to. Without one no runner is
             bound, and every message to the session is refused with
@@ -191,7 +194,7 @@ class OmniClient:
         if title is not None:
             body["title"] = title
         if harness is not None:
-            body["harness"] = harness
+            body["harness_override"] = harness
         if workspace is not None:
             body["workspace"] = workspace
         if host_id is not None:
@@ -283,6 +286,7 @@ class OmniClient:
 
     def ask(
         self,
+        run_id: str,
         session_id: str,
         message: str,
         options: list[str],
@@ -290,27 +294,41 @@ class OmniClient:
         evidence: dict[str, Any] | None = None,
     ) -> str:
         """
-        Raise an approval on a session and return its id.
+        Put the iteration's question to the human, and return the barrier id.
 
-        Sent as a message rather than a policy ASK on purpose. A policy ASK
+        The barrier itself lives in this package, not in Omnigent, for two
+        reasons that both point the same way.
+
+        There is no client-initiated way to raise an elicitation: the session
+        event API accepts ``approval`` and ``mcp_elicitation``, but both are
+        *answers* to something a policy or an MCP server already asked. An
+        external orchestrator has nothing to hook.
+
+        And even if there were, it would be the wrong place. A policy ASK
         raised mid-turn is collapsed to DENY at every phase except INPUT
-        (upstream #765), so a gate that depends on being *asked* must sit at a
-        turn boundary, which is where the loop's iteration boundary already is.
+        (upstream #765), and a turn parked on one trips the harness idle
+        watchdog (#4854). A barrier that has to survive until the next morning
+        cannot live inside a turn.
 
-        :param session_id: Session to ask on.
+        So what this does is post the question into the session as a message —
+        so it is *visible* where the work happened, and answerable from the
+        phone by replying — and hands back an id the run parks on. The
+        authoritative answer arrives as a durable command, via ``army approve``.
+
+        :param run_id: The run being parked, which the barrier id is derived
+            from so it is stable across a restart.
+        :param session_id: Session to post the question into.
         :param message: The question.
         :param options: The choices to offer.
         :param evidence: Anything the human should see before deciding.
-        :returns: The elicitation id to park the run on.
+        :returns: The barrier id to park the run on.
         """
-        payload: dict[str, Any] = {"question": message, "options": options}
+        lines = [message, ""]
         if evidence:
-            payload["evidence"] = evidence
-        response = self._request(
-            "POST",
-            f"/v1/sessions/{session_id}/events",
-            {"type": "elicitation", "data": payload},
-        )
-        if isinstance(response, dict) and response.get("elicitation_id"):
-            return str(response["elicitation_id"])
-        raise OmniError(f"session {session_id} did not return an elicitation id")
+            lines.append("Evidence:")
+            lines += [f"  {key}: {value}" for key, value in sorted(evidence.items())]
+            lines.append("")
+        lines.append(f"Options: {', '.join(options)}")
+        lines.append(f"Answer with: army approve {run_id[:12]} --choice <option>")
+        self.send(session_id, "\n".join(lines))
+        return f"barrier_{run_id}"

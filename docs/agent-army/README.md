@@ -95,23 +95,37 @@ the usual way a subscription-only deployment quietly becomes a keyed one.
 
 ### 2. The roster
 
-Six workers plus the orchestrator that drives them:
+There are two ways in, and they are for different things.
+
+**Drive the orchestrator yourself.** `agents/marshal/` is an agent directory,
+so run it the way you run any other:
 
 ```bash
-omnigent agent import agents/marshal
-omnigent agent list
+omnigent run agents/marshal/
 ```
 
-[`agents/marshal/config.yaml`](../../agents/marshal/config.yaml) is the
-orchestrator. Its rules are the ones worth reading before you change anything:
-it writes no code, it merges nothing, every diff is reviewed by a vendor that
-did not write it, and every iteration ends by asking you.
+[`agents/marshal/config.yaml`](../../agents/marshal/config.yaml) holds the rules
+worth reading before you change anything: it writes no code, it merges nothing,
+every diff is reviewed by a vendor that did not write it, and every iteration
+ends by asking you. Its six workers live under `agents/marshal/agents/` and
+differ only in harness and in what each vendor cannot do — Grok and Kimi cannot
+spawn sub-agents, Antigravity cannot raise an approval, Pi is headless so there
+is no terminal to take over. Those constraints are written into each config so
+marshal routes around them instead of discovering them at 3am.
 
-The six workers under `agents/marshal/agents/` differ only in harness and in
-what each vendor cannot do — Grok and Kimi cannot spawn sub-agents, Antigravity
-cannot raise an approval, Pi is headless so you cannot take over its terminal.
-Those constraints are written into each config so the orchestrator routes
-around them instead of discovering them at 3am.
+**Let `army` drive.** The control plane dispatches through the HTTP API, which
+needs agents that exist in the catalog. Omnigent already seeds one per vendor:
+
+```bash
+curl -s localhost:6767/v1/agents | jq -r '.data[].name'
+# claude-native-ui  codex-native-ui  kimi-native-ui
+# pi-native-ui      antigravity-native-ui  grok  ...
+```
+
+Those are the names to put in `army.toml`. Note that `omnigent run <dir>`
+materialises a *session-scoped* agent rather than adding a catalog row, so a
+custom roster agent is reachable by running it, not by naming it in
+`army.toml`.
 
 ### 3. The loop
 

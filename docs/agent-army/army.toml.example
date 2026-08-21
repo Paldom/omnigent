@@ -23,8 +23,17 @@ max_concurrent_runs = 3
 [workload_options]
 # Constructor arguments for the workload above. These are the demo's.
 queue_path = "army-queue.txt"
-implementer_agent = "claude"
-reviewer_agent = "codex"
+
+# Agent names as they appear in `GET /v1/agents` — Omnigent seeds one per
+# vendor. Point the implementer and the reviewer at DIFFERENT vendors: a diff
+# judged by the model that wrote it is judged by its own blind spots.
+implementer_agent = "claude-native-ui"
+reviewer_agent = "codex-native-ui"
+
+# Host to pin sessions to. Omitted means "the first online host", which is
+# right for a single box. A session with no host gets no runner and every
+# message to it is refused.
+# host_id = "..."
 
 [lanes]
 # Concurrent sessions per vendor. Every sub-agent on one harness shares that
@@ -37,3 +46,8 @@ antigravity-native = 2
 grok = 2
 kimi-native = 2
 pi-native = 2
+
+# Uncomment on a box with no working terminal: the *-native-ui agents wrap a
+# resident vendor TUI in tmux, and fail the turn if it cannot start. A headless
+# harness has no such dependency.
+# harness = "claude-sdk"

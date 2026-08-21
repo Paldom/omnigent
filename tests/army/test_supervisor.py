@@ -44,6 +44,7 @@ class FakeOmni:
 
     def ask(
         self,
+        run_id: str,
         session_id: str,
         message: str,
         options: list[str],
