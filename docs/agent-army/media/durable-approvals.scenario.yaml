@@ -1,0 +1,83 @@
+schema: 1
+name: durable-approvals
+url: http://localhost:7789/c/3fee9763ac664150a8d98aa1656f9f38
+viewport: { width: 1440, height: 900 }
+colorScheme: light
+theme: indigo
+output:
+  fps: 30
+  gif: { start: 14, duration: 9, width: 900 }
+  frame: { background: auto, chrome: true, title: "Omnigent — approval survives a restart" }
+steps:
+  - card:
+      style: hero
+      kicker: "omnigent · pull request"
+      title: "An approval that survives a restart"
+      body: "Same session, same SIGKILL. One build keeps the question; the other loses it."
+      duration: 3.0
+
+  # ── the bug, on main ──────────────────────────────────
+  - wait: { for: "[data-testid=sidebar-conversation-list]", timeout: 20 }
+  - wait: 1.5
+  - card:
+      kicker: "Before"
+      title: "main, after a restart"
+      body: "An approval was raised on this session. Then the server was killed and came back."
+      position: top-right
+      duration: 3.4
+  - zoom: { to: "[data-testid=sidebar-conversation-list]", scale: 1.5 }
+  - card:
+      kicker: "The sidebar"
+      title: "No approval waiting"
+      body: "The session is here. The question it was blocked on is not."
+      at: "[data-testid=sidebar-conversation-list]"
+      side: right
+      duration: 3.4
+  - zoom: reset
+  - wait: 0.6
+  - card:
+      kicker: "The chat"
+      title: "Nothing left to answer"
+      body: "The prompt lived only in RAM, so the restart took it — and the parked turn with it."
+      position: bottom-right
+      duration: 3.6
+
+  # ── the fix ───────────────────────────────────────────
+  - goto: http://localhost:7788/c/c865c782f9b0431c95e2cdd6940cb9e6
+  - wait: { for: "[data-testid=approval-card]", timeout: 25 }
+  - wait: 1.2
+  - card:
+      style: hero
+      kicker: "After"
+      title: "Same restart. Same session."
+      body: "This build writes the prompt to an elicitations row before it publishes it."
+      duration: 3.0
+  - zoom: { to: "[data-testid=sidebar-conversation-list]", scale: 1.5 }
+  - card:
+      kicker: "The sidebar"
+      title: "Needs response"
+      body: "The session still knows it is waiting on you."
+      at: "[data-testid=sidebar-conversation-list]"
+      side: right
+      duration: 3.2
+  - zoom: reset
+  - wait: 0.5
+  - zoom: { to: "[data-testid=approval-card]", scale: 1.4 }
+  - card:
+      kicker: "The chat"
+      title: "The question came back whole"
+      body: "The exact command, ready to approve or reject — as if nothing had happened."
+      at: "[data-testid=approval-card]"
+      side: top
+      duration: 4.0
+  - ring: { to: "[data-testid=approval-card]", pad: 12, dim: 0.35 }
+  - wait: 1.6
+  - ring: hide
+  - zoom: reset
+
+  - card:
+      style: hero
+      kicker: "omnigent-ai/omnigent"
+      title: "Approvals are durable now"
+      body: "One table, written ahead of the index. Answering it releases the runner's parked turn."
+      duration: 3.2
