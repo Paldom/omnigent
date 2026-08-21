@@ -1,0 +1,117 @@
+schema: 1
+name: orchestrator-subagents
+url: http://localhost:7788/
+viewport: { width: 1500, height: 880 }
+colorScheme: light
+theme: indigo
+output:
+  fps: 30
+  gif: { start: 34, duration: 10, width: 1000 }
+  frame:
+    background: auto
+    chrome: true
+    title: "An orchestrator, its sub-agents, and their reports"
+steps:
+  - card:
+      style: hero
+      kicker: "omnigent · orchestration"
+      title: "One agent that writes no code"
+      body: "It splits the work, hands each piece to a different vendor, and reads what comes back."
+      duration: 3.2
+
+  # ── the setup ─────────────────────────────────────────
+  - wait: { for: "[data-testid=new-chat-landing]", timeout: 25 }
+  - wait: 1.2
+  - zoom: { to: "[data-testid=new-chat-landing-composer]", scale: 1.45 }
+  - wait: 1.0
+  - click: "[data-testid=new-chat-landing-agent-select]"
+  - wait: 2.0
+  - card:
+      kicker: "The setup"
+      title: "An orchestrator is just an agent you pick"
+      body: "Same row as the machine, the workspace and the worktree. Swap Claude Code for Polly and the session can spawn."
+      position: bottom-left
+      duration: 4.2
+  - wait: 0.6
+  - press: Escape
+  - zoom: reset
+  - wait: 0.8
+
+  # ── instructions out ──────────────────────────────────
+  - goto: http://localhost:7788/c/a40109000d1f4a79bd7e9e8f47b255fc
+  - wait: { for: "code", timeout: 30 }
+  - wait: 2.5
+  - card:
+      kicker: "One instruction in"
+      title: "\"Delegate, do not fix it yourself\""
+      body: "A costing bug: the fee is charged once, but a round trip pays it on entry and exit."
+      position: top-right
+      duration: 3.8
+  - zoom: { to: "[data-testid=chat-composer], form", scale: 1.5 }
+  - wait: 1.0
+  - card:
+      kicker: "Which agent is running"
+      title: "Polly, on a Claude subscription"
+      body: "The orchestrator brain is a wrapped CLI session like any other — no API key in the picture."
+      position: top-right
+      duration: 3.8
+  - zoom: reset
+  - wait: 0.6
+  - scroll: { to: "text=Worked for 43s" }
+  - wait: 1.5
+  - card:
+      style: hero
+      kicker: "Instructions out"
+      title: "This is the delegation, on the wire"
+      body: "sys_session_send — one call per sub-agent, each with a purpose and its own session."
+      duration: 3.6
+  - zoom: { to: "div.group.not-prose", scale: 1.4 }
+  - wait: 3.2
+  - card:
+      kicker: "And it waits"
+      title: "\"Waiting on it before I hand the diff to a different-vendor reviewer\""
+      body: "Codex implements. Only when it lands does the reviewer get dispatched — and never the same vendor."
+      position: bottom-right
+      duration: 4.4
+  - zoom: reset
+  - wait: 0.8
+
+  # ── reports back ──────────────────────────────────────
+  - scroll: { to: "text=Who did what" }
+  - wait: 1.5
+  - card:
+      kicker: "Reports back"
+      title: "Both reports, assembled"
+      body: "The diff Codex committed, and what the reviewer found — collected by the parent, not by a person."
+      position: top-right
+      duration: 4.2
+  - wait: 1.0
+
+  # ── the tree ──────────────────────────────────────────
+  - click: '[aria-label^="Agents"]'
+  - wait: 2.4
+  - card:
+      kicker: "Two vendors, two worktrees"
+      title: "Codex wrote it. Claude reviewed it."
+      body: "Neither could see the other's checkout. That is the rule that earns its keep."
+      position: bottom-left
+      duration: 4.2
+  - wait: 0.6
+  - zoom: { to: "[data-testid=subagents-panel-drawer]", scale: 1.25 }
+  - wait: 1.0
+  - card:
+      kicker: "Reports back"
+      title: "Each child's summary is its report"
+      body: "\"Implemented and committed on fix/round-trip-fee. Worktree clean; nothing was pushed.\""
+      position: bottom-left
+      duration: 4.6
+  - wait: 0.8
+  - zoom: reset
+  - wait: 0.8
+
+  - card:
+      style: hero
+      kicker: "And it stopped"
+      title: "Nothing was merged"
+      body: "The branch is the deliverable. A human decides what happens to it."
+      duration: 3.4
