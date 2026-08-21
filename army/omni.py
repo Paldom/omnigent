@@ -360,6 +360,35 @@ class OmniClient:
             return []
         return said[last_question + 1 :]
 
+    def was_told(self, session_id: str, text: str) -> bool:
+        """
+        Whether *text* has already been delivered into this session.
+
+        Creating a session and sending its first instruction are two calls, so
+        a crash between them leaves a session that exists and was never asked
+        for anything. Both the consumed items and the pending queue count: an
+        instruction sitting unread by a dead runner has still been delivered,
+        and sending it twice would have the agent do the work twice.
+
+        :param session_id: Session to check.
+        :param text: The instruction, matched as a prefix of a user message
+            since the send wraps it in standing directions.
+        :returns: ``True`` when a user message already carries it.
+        """
+        if not text:
+            return True
+        snapshot = self._request("GET", f"/v1/sessions/{session_id}")
+        for item in snapshot.get("items") or []:
+            if item.get("type") != "message":
+                continue
+            data = item.get("data") or {}
+            if data.get("role") == "user" and text in _text_of(data.get("content")):
+                return True
+        return any(
+            text in _text_of(pending.get("content"))
+            for pending in snapshot.get("pending_inputs") or []
+        )
+
     def get_session(self, session_id: str) -> Session:
         """
         Read a session's current state.

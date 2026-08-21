@@ -177,22 +177,26 @@ class DemoWorkload:
         # the retry instead of orphaning it and starting a second one.
         title = f"{_title(task)}-{run.id[:8]}"
         session_id = omni.find_session(title)
-        if session_id is not None:
-            return [session_id]
-        session_id = omni.create_session(
-            self._agent_id(self.implementer_agent, omni),
-            title=title,
-            workspace=self._worktree_for(run) or self.workspace,
-            host_id=self._host(omni),
-            harness=self.harness,
-        )
-        omni.send(
-            session_id,
-            f"{task}\n\n"
-            "Work on a branch. Commit when the change is coherent and the "
-            "project's own checks pass. Reply with a summary of what you "
-            "changed and why, and the branch name.",
-        )
+        if session_id is None:
+            session_id = omni.create_session(
+                self._agent_id(self.implementer_agent, omni),
+                title=title,
+                workspace=self._worktree_for(run) or self.workspace,
+                host_id=self._host(omni),
+                harness=self.harness,
+            )
+        # Creating the session and sending the task are two calls, so a crash
+        # between them leaves a session that was never told what to do. Reusing
+        # it without checking strands the run until the stall timer, which looks
+        # exactly like an agent thinking hard. Ask whether the task arrived.
+        if not omni.was_told(session_id, task):
+            omni.send(
+                session_id,
+                f"{task}\n\n"
+                "Work on a branch. Commit when the change is coherent and the "
+                "project's own checks pass. Reply with a summary of what you "
+                "changed and why, and the branch name.",
+            )
         return [session_id]
 
     def collect(self, run: Run, omni: OmniClient) -> tuple[bool, dict[str, Any]]:
@@ -259,16 +263,18 @@ class DemoWorkload:
         to an approval — a gate that approves when unanswered is not a gate.
         """
         if decision == "deny":
-            self._requeue(run)
-            return "paused", "declined; task returned to the queue"
+            # The line stays `taken:`. A paused run is resumable — `army resume`
+            # sends this same run back to READY — so the run still holds the
+            # claim, and returning the task to the queue would let the next tick
+            # open a second run for work somebody just declined.
+            return "paused", "declined; the branch is paused until `army resume`"
 
         choice = str(payload.get("choice") or "")
         if choice not in self.OPTIONS:
             # An unrecognised choice must not fall through to "approved". The
             # barrier exists to be answered deliberately; a typo is not an
             # answer, and defaulting one to merge is the worst possible guess.
-            self._requeue(run)
-            return "paused", f"unrecognised choice {choice!r}; task returned to the queue"
+            return "paused", f"unrecognised choice {choice!r}; paused for a real answer"
         if choice == "stop":
             self._mark_done(run)
             return "completed", "owner stopped the loop"

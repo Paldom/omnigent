@@ -36,6 +36,8 @@ class FakeOmni:
         self.replies: list[str] = []
         self.harness: str | None = None
         self.tail: str = ""
+        self.told: set[str] = set()
+        self.titles: dict[str, str] = {}
 
     def create_session(self, agent_id: str, **kwargs: Any) -> str:
         session_id = f"conv_{len(self.sessions):032d}"
@@ -43,7 +45,7 @@ class FakeOmni:
         return session_id
 
     def send(self, session_id: str, text: str) -> None:
-        pass
+        self.told.add(session_id)
 
     def get_session(self, session_id: str) -> Any:
         from army.omni import Session
@@ -59,6 +61,15 @@ class FakeOmni:
 
     def replies_after(self, session_id: str, marker: str) -> list[str]:
         return list(self.replies)
+
+    def was_told(self, session_id: str, text: str) -> bool:
+        return session_id in self.told
+
+    def find_session(self, title: str) -> str | None:
+        return self.titles.get(title)
+
+    def resolve_agent(self, name_or_id: str) -> str:
+        return f"ag_{name_or_id}"
 
     def ask(
         self,
@@ -845,3 +856,55 @@ def test_the_question_never_carries_the_command_that_answers_it() -> None:
     assert "abc123def456"[:12] in marker
     assert "army approve" not in marker
     assert "--choice" not in marker
+
+
+# ── a denied branch keeps its claim ────────────────────────
+
+
+def test_a_denied_task_is_not_immediately_available_again(tmp_path: Path) -> None:
+    """Declining must stop the branch, not restart it.
+
+    The paused run is resumable — ``army resume`` sends this same run back to
+    READY — so it still holds the task. Returning the line to the queue as well
+    let the very next tick open a second run for work somebody had just
+    declined, which is the opposite of what a decline is for.
+    """
+    from army.state import Run
+    from army.workloads.demo import DemoWorkload as RealDemoWorkload
+
+    queue = tmp_path / "queue.txt"
+    queue.write_text("build the thing\n")
+    workload = RealDemoWorkload(queue_path=str(queue))
+
+    item = workload.acquire()
+    assert item is not None
+    state, _ = workload.apply(Run.new("demo", item, now=0), "deny", {})
+
+    assert state == "paused"
+    assert queue.read_text().strip() == "taken: build the thing"
+
+
+def test_a_redispatch_delivers_the_task_the_first_attempt_never_sent(tmp_path: Path) -> None:
+    """Creating a session and telling it what to do are two calls.
+
+    A crash between them leaves a session that exists and was never asked for
+    anything. Reusing it by title without checking stranded the run until the
+    stall timer — indistinguishable, from outside, from an agent thinking.
+    """
+    from army.state import Run
+    from army.workloads.demo import DemoWorkload as RealDemoWorkload
+
+    queue = tmp_path / "queue.txt"
+    queue.write_text("build the thing\n")
+    workload = RealDemoWorkload(queue_path=str(queue))
+    omni = FakeOmni()
+    run = Run.new("demo", {"task": "build the thing", "line": 0}, now=0)
+
+    # First attempt: the session is created, then the process dies before send.
+    created = omni.create_session("ag_worker")
+    omni.titles[f"build-the-thing-{run.id[:8]}"] = created
+
+    sessions = workload.dispatch(run, omni)
+
+    assert sessions == [created]
+    assert created in omni.told
