@@ -1,0 +1,39 @@
+# Agent Army configuration. Copy to ./army.toml or ~/.omnigent/army.toml.
+#
+# No secrets here — this file sits next to the agent roster and should stay
+# safe to commit. The server token is read from ARMY_TOKEN, and the broker key
+# from ARMY_BROKER_KEY, both out of the environment.
+
+[army]
+# Where the Omnigent server is.
+server_url = "http://localhost:6767"
+
+# The loop's own state: runs, commands, and the effects journal. This is the
+# file that has to survive a reboot. Back it up.
+state_path = "~/.omnigent/army/army.db"
+
+# Which job of work to run. "module:Class" — see army/workload.py for the five
+# methods your own needs to implement.
+workload = "army.workloads.demo:DemoWorkload"
+
+# Iterations in flight at once. More than the number of vendors just queues
+# work behind the same subscriptions.
+max_concurrent_runs = 3
+
+[workload_options]
+# Constructor arguments for the workload above. These are the demo's.
+queue_path = "army-queue.txt"
+implementer_agent = "claude"
+reviewer_agent = "codex"
+
+[lanes]
+# Concurrent sessions per vendor. Every sub-agent on one harness shares that
+# harness's single login, so this is the real concurrency bound — not a global
+# worker count. Start at two and raise a lane once you have watched it
+# saturate without complaint from the vendor.
+claude-native = 2
+codex-native = 2
+antigravity-native = 2
+grok = 2
+kimi-native = 2
+pi-native = 2

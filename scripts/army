@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Run the agent-army control plane from a source checkout.
+# Put this directory on your PATH, or call `python -m army` directly.
+set -euo pipefail
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+exec "${ARMY_PYTHON:-python3}" -m army "$@"
