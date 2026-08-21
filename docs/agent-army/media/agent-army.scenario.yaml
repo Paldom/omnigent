@@ -1,0 +1,106 @@
+schema: 1
+name: agent-army
+url: http://localhost:7788/
+viewport: { width: 1440, height: 900 }
+colorScheme: light
+theme: indigo
+output:
+  fps: 30
+  gif: { start: 38, duration: 9, width: 900 }
+  frame: { background: auto, chrome: true, title: "Agent Army — an orchestrator that survives the night" }
+steps:
+  - card:
+      style: hero
+      kicker: "omnigent · agent army"
+      title: "Six vendors. One loop. No API keys."
+      body: "Claude, Codex, Grok, Kimi, Pi and Antigravity — all on subscription logins."
+      duration: 3.2
+
+  # ── picking a vendor ──────────────────────────────────
+  - wait: { for: "[data-testid=new-chat-landing]", timeout: 20 }
+  - wait: 1.0
+  - zoom: { to: "[data-testid=new-chat-landing-composer]", scale: 1.4 }
+  - hover: { to: "[data-testid=new-chat-landing-agent-select]" }
+  - card:
+      kicker: "One session API"
+      title: "The vendor is a setting"
+      body: "Same session, same tools, same policies — swap who runs it without rewriting."
+      at: "[data-testid=new-chat-landing-composer]"
+      side: bottom
+      duration: 3.6
+  - zoom: reset
+  - wait: 0.5
+
+  # ── a real turn ───────────────────────────────────────
+  - click: "text=sdk-probe"
+  - wait: { for: "[data-testid=message-bubble]", timeout: 20 }
+  - wait: 1.2
+  - card:
+      kicker: "A real turn"
+      title: "Reading the code it runs on"
+      body: "No API key anywhere — this is the Claude subscription the vendor CLI already holds."
+      position: top-right
+      duration: 3.6
+  - scroll: { to: "[data-testid=assistant-text-section]" }
+  - wait: 0.8
+  - zoom: { to: "[data-testid=assistant-text-section]", scale: 1.3 }
+  - wait: 2.6
+  - zoom: reset
+
+  # ── per-agent state ───────────────────────────────────
+  - zoom: { to: "[data-testid=files-panel-drawer]", scale: 1.5 }
+  - card:
+      kicker: "Per agent, not global"
+      title: "Its own workspace"
+      body: "Each worker gets its own worktree, its own files, its own terminal to take over."
+      at: "[data-testid=files-panel-drawer]"
+      side: left
+      duration: 3.6
+  - zoom: reset
+  - wait: 0.5
+
+  # ── the barrier ───────────────────────────────────────
+  - card:
+      style: hero
+      kicker: "The hard part"
+      title: "Every iteration ends by asking you"
+      body: "And the question has to still be there when you get round to it."
+      duration: 3.0
+  - click: "text=auth-refactor"
+  - wait: { for: "[data-testid=approval-card]", timeout: 25 }
+  - wait: 1.2
+  - card:
+      kicker: "After a SIGKILL and a restart"
+      title: "Still here. Still answerable."
+      body: "The exact command, the same buttons — the restart cost nothing."
+      position: bottom-right
+      duration: 3.4
+  - zoom: { to: "[data-testid=approval-card]", scale: 1.4 }
+  - ring: { to: "[data-testid=approval-card]", pad: 12, dim: 0.35 }
+  - card:
+      kicker: "Durable by construction"
+      title: "A row, not a callback"
+      body: "A parked coroutine dies with its process. A row that says what you decided does not."
+      at: "[data-testid=approval-card]"
+      side: bottom
+      duration: 4.0
+  - ring: hide
+  - zoom: reset
+  - wait: 0.6
+
+  # ── the heartbeat ─────────────────────────────────────
+  - click: "[data-testid=scheduled-tasks-nav]"
+  - wait: 2.0
+  - card:
+      kicker: "Scheduler-driven"
+      title: "Not a while-true loop"
+      body: "A cheap scripted check wakes the judgement session only when there is something to judge."
+      position: bottom-right
+      duration: 3.6
+
+  - card:
+      style: hero
+      kicker: "army run"
+      title: "Kill it. Start it. Carry on."
+      body: "The loop keeps its place in SQLite, so a reboot costs nothing but the tick it was in."
+      duration: 3.2

@@ -3,6 +3,14 @@
 An orchestrator for a team of coding agents running on six different vendors,
 coordinated by a loop that keeps going after you close the laptop.
 
+![Six vendors, one loop, an approval that survives a restart](media/agent-army.gif)
+
+*Recorded against this repository — real sessions, a real Claude turn reading
+`army/state.py`, and an approval card still answerable after the server was
+SIGKILLed and restarted. The scenario is
+[`media/agent-army.scenario.yaml`](media/agent-army.scenario.yaml); full-quality
+MP4 is [`media/agent-army.mp4`](media/agent-army.mp4).*
+
 It is two pieces that own different things:
 
 | | Owns | Lives in |
