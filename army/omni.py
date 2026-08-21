@@ -67,13 +67,18 @@ def barrier_marker(run_id: str) -> str:
     """
     The line that identifies one run's question in a session transcript.
 
-    Carries the run id, so two iterations asking in the same session cannot be
-    confused for each other, and doubles as the terminal instruction.
+    Carries the run id so two iterations asking in the same session cannot be
+    confused for each other, and nothing else. It used to double as the
+    instruction — ``army approve <run> --choice <option>`` — which posted a
+    working self-approval command into the transcript of the very agent the
+    question exists to gate. An agent completing an instruction it can see is
+    not misbehaviour; it is the default. The terminal command belongs in
+    ``army status``, which only the owner runs.
 
     :param run_id: The run being asked about.
     :returns: A line unique to this run's question.
     """
-    return f"Answer with: army approve {run_id[:12]} --choice <option>"
+    return f"[army] awaiting a decision on iteration {run_id[:12]}"
 
 
 def _text_of(content: Any) -> str:
@@ -430,6 +435,13 @@ class OmniClient:
         phone by replying — and hands back an id the run parks on. The
         authoritative answer arrives as a durable command, via ``army approve``.
 
+        What it deliberately does **not** post is the command that answers it.
+        The session belongs to the agent being gated, and an agent that reads a
+        working ``army approve`` line in its own transcript will complete it —
+        not out of malice, but because completing a visible instruction is what
+        it does. See "Known edges" in the guide for what this barrier is and is
+        not: it stops an honest agent, not one that goes looking.
+
         :param run_id: The run being parked, which the barrier id is derived
             from so it is stable across a restart.
         :param session_id: Session to post the question into.
@@ -445,7 +457,7 @@ class OmniClient:
             lines.append("")
         lines.append(f"Options: {', '.join(options)}")
         # The marker is what `replies_after` splits on, so earlier chatter
-        # cannot answer retroactively. It doubles as the instruction.
-        lines.append(f"{barrier_marker(run_id)} — or just reply with one option.")
+        # cannot answer retroactively. An identifier, not an instruction.
+        lines.append(f"{barrier_marker(run_id)} — reply with one option to answer.")
         self.send(session_id, "\n".join(lines))
         return f"barrier_{run_id}"

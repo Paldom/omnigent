@@ -206,11 +206,9 @@ elicitation — the session event API takes `approval` and `mcp_elicitation`, bu
 both are *answers* to something a policy or an MCP server already asked.
 
 Even if there were one, inside a turn is the wrong place for this barrier: a
-policy ASK raised mid-turn is collapsed to DENY outside the INPUT phase
-([#765](https://github.com/omnigent-ai/omnigent/issues/765)), and a turn parked
-on one trips the harness idle watchdog
-([#4854](https://github.com/omnigent-ai/omnigent/issues/4854)). Something that
-has to survive until the next morning cannot be a parked turn.
+turn parked on an approval trips the harness idle watchdog
+([#4854](https://github.com/omnigent-ai/omnigent/issues/4854)), and something
+that has to survive until the next morning cannot be a parked turn.
 
 So the question is *posted into the session as a message* — visible where the
 work happened, readable from a phone — while the barrier that actually gates
@@ -257,14 +255,21 @@ nobody enumerated. Evaluation order proves a session policy cannot override an
 admin one — it does not prove every route goes through the policy engine, and
 several plainly do not.
 
-So the agents simply do not hold the credential.
-[`army/gates.py`](../../army/gates.py) runs the broker that does, in a different
-process, and it refuses to act without a grant signed over a digest of the exact
-operation, with an expiry. An approval for "merge PR 42" cannot be replayed as
-"merge PR 43", and one you gave last week is not consent for tonight.
-[`tests/army/test_gates.py`](../../tests/army/test_gates.py) is written as
-bypass attempts rather than happy paths, which is the only way this kind of test
-is worth anything.
+So the design is that agents do not hold the credential: a broker holds it in a
+different process, and refuses to act without a grant signed over a digest of
+the exact operation, with an expiry and one use. An approval for "merge PR 42"
+cannot be replayed as "merge PR 43", one you gave last week is not consent for
+tonight, and a grant already spent is refused even across a restart.
+
+**What exists today is the primitive, not the boundary.**
+[`army/gates.py`](../../army/gates.py) implements the signing, the digest
+binding, the expiry and the one-shot spend, and
+[`tests/army/test_gates.py`](../../tests/army/test_gates.py) is written as bypass
+attempts rather than happy paths. But nothing in the running loop constructs a
+`Broker` — grep for it and you will find only the tests. There is no broker
+process, no owner endpoint, and no operation routed through it. Until there is,
+treat this section as the intended design and the loop as having no capability
+boundary: do not give it credentials that can merge, publish, spend, or trade.
 
 The policy engine stays on as defence in depth and as the right place to raise a
 question. It is just not the thing standing between an agent and your money.
@@ -293,12 +298,45 @@ replaces it.
 
 Worth knowing before you rely on this unattended.
 
-**A mid-turn approval is not asked.** A policy `ASK` raised at `TOOL_CALL`,
+**The barrier stops an honest agent, not a determined one.** This is the
+important one, and the earlier drafts of this guide called the gate "owner-only"
+without earning it.
+
+What holds: the loop will not proceed past `WAITING_HUMAN` until a durable
+command arrives, and it cannot be talked past — the reply parser matches whole
+words, inverts on negation, ignores anything the assistant said, and parks on an
+answer it does not recognise rather than guessing.
+
+What does not hold is *who* can send that command. Workers run as
+`caller_process` with `sandbox: none`, under your OS user, so a worker can write
+the SQLite file `army approve` writes, and can post a user-role message into its
+own session over the local API. Nothing authenticates the answerer. The question
+no longer carries the `army approve` command — posting a working self-approval
+line into the transcript of the agent being gated was inviting exactly the
+mistake the gate exists to prevent — but removing the instruction is not the
+same as removing the capability.
+
+So: this is a coordination barrier against an agent that would otherwise barrel
+ahead, and against your own inattention. It is not a security boundary against a
+worker that goes looking for the state. If you need that, the missing pieces are
+privilege separation — a sandboxed worker or a separate OS user — and approval
+state the worker cannot write. A per-run nonce in `army approve` would harden the
+CLI path on its own, but the chat-reply path would still be open, so it is worth
+doing as part of that work rather than instead of it.
+
+The real boundary for anything irreversible is meant to be different in kind:
+agents do not hold the credential. That is what `gates.py` is for — and see the
+next edge for how far along that actually is.
+
+**Some mid-turn approvals are not asked.** A policy `ASK` raised at
 `TOOL_RESULT`, `OUTPUT` or sub-agent start is collapsed to `DENY` rather than
 put to you ([upstream #765](https://github.com/omnigent-ai/omnigent/issues/765)).
-Only `INPUT`-phase asks actually ask. That is why the loop's own gate sits at an
-iteration boundary: the question gates the *next* dispatch rather than parking
-inside a turn.
+`TOOL_CALL` is the exception and does raise a real elicitation — verified here
+against the code path, the tests that pin the verdict, and a live bench probe,
+and [reported upstream](https://github.com/omnigent-ai/omnigent/issues/765#issuecomment-5369575934)
+so the issue's scope narrows. So a policy ASK at `TOOL_CALL` is worth writing as
+defence in depth. It is still not where this loop's own gate sits, for the
+reason above: that gate has to outlast a night, and a parked turn cannot.
 
 **A parked turn can trip the idle watchdog.**
 [#4854](https://github.com/omnigent-ai/omnigent/issues/4854) — a turn waiting on

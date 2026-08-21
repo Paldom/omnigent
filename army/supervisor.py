@@ -38,9 +38,18 @@ MAX_ATTEMPTS = 3
 #: the supervisor calls it stuck. A transient error retried forever looks
 #: exactly like progress from outside — the loop keeps ticking and nothing ever
 #: changes — so the retry has to be bounded by something. Generous, because
-#: agent turns are genuinely slow; ``WAITING_HUMAN`` is exempt, since waiting is
-#: the whole point of that state.
+#: agent turns are genuinely slow; the states that wait on a person are exempt.
 STALL_SECONDS = 3600
+
+#: States that park on a person rather than on progress. Neither can be stuck,
+#: and neither has a legal move to FAILED — a stall check that fired on one
+#: would raise IllegalTransition and take the whole pass down with it.
+_STALL_EXEMPT = frozenset({RunState.WAITING_HUMAN, RunState.PAUSED})
+
+#: Artifact key holding the lanes this run's sessions were charged to, so the
+#: release returns each charge to the lane it came from. Draining the busiest
+#: lane instead moves a charge rather than removing it.
+_CHARGED_LANES = "charged_lanes"
 
 #: What a decision maps to when the workload does not say.
 _DECISION_STATES = {
@@ -161,11 +170,12 @@ class Supervisor:
         :param now: Unix epoch seconds.
         :returns: The run after its move, or ``None`` if it stayed put.
         """
-        # WAITING_HUMAN is exempt: a run parked on a person is not stuck, it is
-        # doing exactly what it was asked to. Everything else moving its version
-        # is what progress looks like, so a version that has not moved in an
-        # hour means the retry loop is not getting anywhere.
-        if run.state is not RunState.WAITING_HUMAN and now - run.updated_at > STALL_SECONDS:
+        # Waiting on a person is not being stuck, so the two states that do it
+        # are exempt: WAITING_HUMAN parks on an answer, PAUSED parks on someone
+        # deciding to restart the branch, and both are meant to outlast a night.
+        # Everywhere else a version that has not moved in an hour means the
+        # retry loop is not getting anywhere.
+        if run.state not in _STALL_EXEMPT and now - run.updated_at > STALL_SECONDS:
             return self._fail(
                 run,
                 f"stuck in {run.state.value} for {(now - run.updated_at) // 60} minutes",
@@ -228,9 +238,11 @@ class Supervisor:
         """Move ``READY`` to ``DISPATCHING``, respecting attempt limits and lanes."""
         if run.attempt >= MAX_ATTEMPTS:
             return self._fail(run, f"gave up after {run.attempt} attempts", now=now)
-        if self.lanes is not None and not self.lanes.has_capacity():
-            # Every vendor lane is full or cooling down. Leaving the run in
-            # READY is the backpressure: it will be picked up when a lane frees.
+        if self.lanes is not None and not self.lanes.would_admit(_workload_lane(self.workload)):
+            # The lane this run will land on is full or cooling. Leaving it in
+            # READY is the backpressure: it goes when that lane frees. Asking
+            # "is any lane free" instead would admit a third Claude session
+            # because Grok happens to be idle.
             return None
         moved = self.store.transition(run, RunState.DISPATCHING, attempt=run.attempt + 1, now=now)
         return self._dispatch_children(moved, now=now)
@@ -246,10 +258,16 @@ class Supervisor:
                 _logger.warning("dispatch for run %s hit a transient error: %s", run.id, exc)
                 return None
             return self._fail(run, f"dispatch failed: {exc}", now=now)
-        self._charge_lanes(sessions)
-        return self.store.transition(run, RunState.COLLECTING, outstanding=sessions, now=now)
+        charged = self._charge_lanes(sessions)
+        return self.store.transition(
+            run,
+            RunState.COLLECTING,
+            outstanding=sessions,
+            artifacts={**run.artifacts, _CHARGED_LANES: charged},
+            now=now,
+        )
 
-    def _charge_lanes(self, session_ids: list[str]) -> None:
+    def _charge_lanes(self, session_ids: list[str]) -> list[str]:
         """Occupy the lane each session actually landed on.
 
         Asking the server which harness bound is the only honest way to do
@@ -263,9 +281,12 @@ class Supervisor:
         reason to fail an iteration that has already started.
 
         :param session_ids: Sessions just dispatched.
+        :returns: The harness each session landed on, so the release can return
+            the charge to the same lane it came from.
         """
+        charged: list[str] = []
         if self.lanes is None:
-            return
+            return charged
         for session_id in session_ids:
             try:
                 harness = self.omni.get_session(session_id).harness
@@ -274,6 +295,7 @@ class Supervisor:
                 continue
             if harness is None:
                 continue
+            charged.append(harness)
             if not self.lanes.acquire(1, harness):
                 _logger.warning(
                     "session %s runs on %r, which has no configured lane — "
@@ -281,6 +303,24 @@ class Supervisor:
                     session_id,
                     harness,
                 )
+        return charged
+
+    def _release_lanes(self, run: Run) -> None:
+        """Return this run's charges to the lanes they came from.
+
+        Falls back to an unkeyed release only for a run charged before the
+        lanes were recorded — an old row mid-flight across an upgrade.
+
+        :param run: The run whose sessions have finished.
+        """
+        if self.lanes is None:
+            return
+        charged = run.artifacts.get(_CHARGED_LANES)
+        if isinstance(charged, list) and charged:
+            for harness in charged:
+                self.lanes.release(1, str(harness))
+            return
+        self.lanes.release(len(run.outstanding))
 
     def _collect(self, run: Run, *, now: int) -> Run | None:
         """Gather finished work; stay in ``COLLECTING`` until it is all in."""
@@ -302,7 +342,7 @@ class Supervisor:
             # costs the remaining children, not the ones already finished.
             return self.store.transition(run, RunState.COLLECTING, artifacts=merged, now=now)
         if self.lanes is not None:
-            self.lanes.release(len(run.outstanding))
+            self._release_lanes(run)
         return self.store.transition(
             run, RunState.EVALUATING, artifacts=merged, outstanding=[], now=now
         )
@@ -358,7 +398,7 @@ class Supervisor:
         session_id, harness, phrase = limited
         assert self.lanes is not None
         self.lanes.rate_limited(harness)
-        self.lanes.release(len(run.outstanding))
+        self._release_lanes(run)
         _logger.warning(
             "run %s: %s hit a %r limit on session %s — cooling that lane and requeueing",
             run.id,
@@ -484,7 +524,7 @@ class Supervisor:
     def _fail(self, run: Run, reason: str, *, now: int) -> Run | None:
         """Move a run to ``FAILED``, tolerating a race with another mover."""
         if self.lanes is not None and run.outstanding:
-            self.lanes.release(len(run.outstanding))
+            self._release_lanes(run)
         try:
             return self.store.transition(
                 run, RunState.FAILED, terminal_reason=reason, outstanding=[], now=now
@@ -568,6 +608,19 @@ def _options_named_in(reply: str, options: list[str]) -> list[tuple[str, bool]]:
             found.append((option, negated))
             break
     return found
+
+
+def _workload_lane(workload: Workload) -> str | None:
+    """The vendor a workload dispatches to, when it commits to one.
+
+    Optional by design: a workload that spreads across vendors, or picks per
+    item, has no single answer and gets the any-lane check instead.
+
+    :param workload: The workload about to dispatch.
+    :returns: A harness id, or ``None`` when the workload does not declare one.
+    """
+    harness = getattr(workload, "harness", None)
+    return harness if isinstance(harness, str) and harness else None
 
 
 def _asking_session(run: Run) -> str | None:

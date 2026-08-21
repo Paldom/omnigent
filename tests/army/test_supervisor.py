@@ -18,7 +18,7 @@ from army.lanes import Lane, Lanes, limit_phrase_in
 from army.omni import OmniError
 from army.state import Command, CommandKind, IllegalTransition, Run, RunState
 from army.store import ConcurrentTransition, Store
-from army.supervisor import MAX_ATTEMPTS, Supervisor
+from army.supervisor import MAX_ATTEMPTS, STALL_SECONDS, Supervisor
 
 
 class FakeOmni:
@@ -80,8 +80,11 @@ class DemoWorkload:
 
     name = "demo"
 
-    def __init__(self, items: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self, items: list[dict[str, Any]] | None = None, harness: str | None = None
+    ) -> None:
         self.items = list(items or [{"task": "build the thing"}])
+        self.harness = harness
         self.collect_calls = 0
         self.ready_after = 1
         self.dispatch_error: OmniError | None = None
@@ -341,8 +344,6 @@ def test_a_stuck_run_is_eventually_failed(store: Store) -> None:
     The loop keeps ticking, the report says "unchanged", and nothing ever
     happens — which is worse than failing, because nobody goes looking.
     """
-    from army.supervisor import STALL_SECONDS
-
     omni, workload = FakeOmni(), DemoWorkload()
     workload.ready_after = 10_000  # never finishes collecting
     supervisor = Supervisor(store, omni, workload)
@@ -754,3 +755,93 @@ def test_a_repo_that_cannot_make_a_worktree_still_runs(tmp_path: Path) -> None:
     )
 
     assert workload._worktree_for(Run.new("demo", {}, now=1)) is None
+
+
+# ── waiting on a person is not being stuck ─────────────────
+
+
+def test_a_paused_run_survives_longer_than_the_stall_window(store: Store) -> None:
+    """Denying at night and resuming in the morning is the whole feature.
+
+    PAUSED has no legal move to FAILED, so a stall check that fired on one did
+    not merely fail that run — it raised out of ``tick``, and every other run in
+    that pass stopped advancing with it.
+    """
+    omni = FakeOmni()
+    workload = DemoWorkload()
+    supervisor = Supervisor(store, omni, workload)
+    run = _drive_to_waiting(store, omni, workload)
+    store.record_command(Command.new(run.id, CommandKind.DENY, {}, now=1000))
+    supervisor.tick(now=1000)
+
+    paused = store.list_runs()[0]
+    assert paused.state is RunState.PAUSED
+
+    store.record_command(Command.new(paused.id, CommandKind.RESUME, {}, now=paused.updated_at))
+    supervisor.tick(now=paused.updated_at + STALL_SECONDS + 1)
+
+    assert store.list_runs()[0].state is RunState.READY
+
+
+# ── lane accounting is symmetric ───────────────────────────
+
+
+def test_a_finished_run_releases_the_lane_it_actually_used(store: Store) -> None:
+    """Releasing the busiest lane moves a charge instead of removing it.
+
+    A run that held Grok, released while Claude was busier, used to decrement
+    Claude — leaving Grok charged for a session that had ended, so that lane
+    silently shrank with every iteration.
+    """
+    lanes = Lanes([Lane("claude-native", 4), Lane("grok", 4)])
+    lanes.acquire(2, "claude-native")  # another run, busier lane
+    omni = FakeOmni()
+    omni.harness = "grok"
+    supervisor = Supervisor(store, omni, DemoWorkload(), lanes=lanes)
+
+    supervisor.tick()
+    supervisor.tick()
+    assert lanes.depth()["grok"]["in_flight"] == 2
+
+    while store.list_runs()[0].state is not RunState.WAITING_HUMAN:
+        supervisor.tick()
+
+    depth = lanes.depth()
+    assert depth["grok"]["in_flight"] == 0
+    assert depth["claude-native"]["in_flight"] == 2
+
+
+def test_a_full_vendor_lane_holds_work_back_even_when_another_is_idle(store: Store) -> None:
+    """ "Is any lane free" is the wrong question when the workload picks one.
+
+    The demo workload dispatches to a fixed harness, so an idle Grok lane must
+    not admit a third Claude session it will never run.
+    """
+    lanes = Lanes([Lane("claude-native", 1), Lane("grok", 8)])
+    lanes.acquire(1, "claude-native")
+    omni = FakeOmni()
+    omni.harness = "claude-native"
+    supervisor = Supervisor(store, omni, DemoWorkload(harness="claude-native"), lanes=lanes)
+
+    supervisor.tick()
+    supervisor.tick()
+
+    assert store.list_runs()[0].state is RunState.READY
+
+
+def test_the_question_never_carries_the_command_that_answers_it() -> None:
+    """The gated agent reads this transcript.
+
+    An ``army approve <run> --choice ship`` line posted into the worker's own
+    session is a working self-approval command handed to the party the barrier
+    exists to stop — and an agent completing a visible instruction is the
+    default behaviour, not an attack. The owner gets the command from
+    ``army status``.
+    """
+    from army.omni import barrier_marker
+
+    marker = barrier_marker("abc123def456")
+
+    assert "abc123def456"[:12] in marker
+    assert "army approve" not in marker
+    assert "--choice" not in marker

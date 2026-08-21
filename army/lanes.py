@@ -162,6 +162,14 @@ class Lanes:
         Kimi counters, so a full Claude lane still admits work and the numbers
         describe a fleet that is not running.
 
+        This records what is running; it does not admit it. The session already
+        exists by the time anyone knows which vendor bound it, so a charge that
+        pushes a lane past its cap is reporting reality, not permitting it —
+        and over-counting is the safe direction, because it makes
+        :meth:`available` return zero and holds the next dispatch back.
+        Under-counting would quietly admit more. :meth:`would_admit` is the
+        check that belongs *before* dispatch.
+
         :param count: How many.
         :param harness: Which lane. ``None`` spreads across lanes with room,
             which is only meaningful when the caller genuinely does not know
@@ -183,13 +191,41 @@ class Lanes:
             self._lanes[chosen].in_flight += 1
         return True
 
+    def would_admit(self, harness: str | None, *, now: int | None = None) -> bool:
+        """
+        Whether the lane this work will land on has room for it.
+
+        The check :meth:`has_capacity` cannot make: it answers "is *some* lane
+        free", which admits a third Claude session because Grok is idle. When
+        the caller knows the vendor in advance, this is the honest question.
+
+        :param harness: The lane the work will use, or ``None`` when the caller
+            genuinely does not know, in which case any free lane will do.
+        :param now: Unix epoch seconds; defaults to the clock.
+        :returns: ``True`` when there is room. An unconfigured harness is
+            unbounded by definition, so it is always admitted.
+        """
+        if harness is None:
+            return self.has_capacity(now=now)
+        lane = self._lanes.get(harness)
+        if lane is None:
+            return True
+        stamp = int(time.time()) if now is None else now
+        return lane.available(now=stamp) > 0
+
     def release(self, count: int = 1, harness: str | None = None) -> None:
         """
         Record that sessions have finished.
 
+        Name the harness. Draining the busiest lane instead of the one this
+        work occupied moves the charge rather than removing it: a run that held
+        Claude and Grok can return both to Claude, leaving Grok charged for a
+        session that ended.
+
         :param count: How many.
         :param harness: Which lane, or ``None`` to drain the busiest lanes
-            first, mirroring how :meth:`acquire` filled the emptiest.
+            first — a last resort for a caller that never recorded where its
+            work landed.
         """
         if harness is not None:
             lane = self._lanes.get(harness)
