@@ -97,7 +97,17 @@ class DemoWorkload:
         :returns: A path to use as the session workspace, or ``None`` to use
             the shared one.
         """
-        if self.worktrees is None or not self.workspace:
+        if self.worktrees is None:
+            return None
+        if not self.workspace:
+            # Configuring `worktrees` without `workspace` used to return None
+            # here and run everything in one shared directory — isolation you
+            # asked for, silently not happening. Say so; the loop still runs.
+            _logger.warning(
+                "worktrees is set to %s but workspace is not, so there is no "
+                "repository to branch from — every run shares one checkout",
+                self.worktrees,
+            )
             return None
         target = self.worktrees / run.id[:12]
         if target.exists():
@@ -207,8 +217,13 @@ class DemoWorkload:
             return True, {"error": "nothing was dispatched"}
 
         implementer = omni.get_session(implementer_id)
-        if implementer.status == "running":
+        if _still_working(implementer.status):
             return False, {}
+        if implementer.status == _FAILED:
+            # A failed session produced nothing. Treating it as finished work
+            # sends the reviewer to read a branch nobody wrote and then asks a
+            # human to approve it. Fail the iteration and say which session.
+            return True, {"error": f"implementer session {implementer_id} failed"}
 
         artifacts["implementer_session"] = implementer_id
         # The approval belongs on the implementer's session: that is where the
@@ -236,8 +251,10 @@ class DemoWorkload:
             return False, artifacts
 
         reviewer = omni.get_session(str(reviewer_id))
-        if reviewer.status == "running":
+        if _still_working(reviewer.status):
             return False, artifacts
+        if reviewer.status == _FAILED:
+            return True, {**artifacts, "error": f"reviewer session {reviewer_id} failed"}
         artifacts["reviewer_session"] = reviewer_id
         return True, artifacts
 
@@ -308,6 +325,25 @@ class DemoWorkload:
             return
         lines[index] = render(str(task))
         self.queue_path.write_text("\n".join(lines) + "\n")
+
+
+#: The only status that means this iteration's work is in. Upstream's literal is
+#: ``idle | running | waiting | failed``: ``waiting`` is mid-turn on an
+#: elicitation, and anything unrecognised is a status this workload has not been
+#: taught, so both keep waiting rather than being accepted as a result.
+_DONE = frozenset({"idle"})
+_FAILED = "failed"
+
+
+def _still_working(status: str | None) -> bool:
+    """
+    Whether a session status means the iteration should keep waiting.
+
+    :param status: The server's session status, or ``None`` when unknown.
+    :returns: ``True`` unless the session has reached a terminal status this
+        workload recognises.
+    """
+    return status not in _DONE and status != _FAILED
 
 
 def _title(task: str) -> str:

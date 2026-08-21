@@ -908,3 +908,22 @@ def test_a_redispatch_delivers_the_task_the_first_attempt_never_sent(tmp_path: P
 
     assert sessions == [created]
     assert created in omni.told
+
+
+def test_a_failed_session_is_not_collected_as_finished_work() -> None:
+    """``running`` is not the only status that means "not done yet".
+
+    Upstream's session status is ``idle | running | waiting | failed``. Waiting
+    only while it reads ``running`` meant a failed session — which produced
+    nothing — started the reviewer on a branch nobody wrote, and ended with a
+    human being asked to approve it. ``waiting`` is mid-turn on an elicitation
+    and would have counted as done too.
+    """
+    from army.workloads.demo import _still_working
+
+    assert _still_working("running") is True
+    assert _still_working("waiting") is True
+    assert _still_working(None) is True
+    assert _still_working("some-status-added-next-week") is True
+    assert _still_working("idle") is False
+    assert _still_working("failed") is False

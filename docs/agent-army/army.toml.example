@@ -30,6 +30,11 @@ queue_path = "army-queue.txt"
 implementer_agent = "claude-native-ui"
 reviewer_agent = "codex-native-ui"
 
+# The repository the agents work in. Every session opens here unless a worktree
+# gives it its own checkout, so worktrees below need this set to have anything
+# to branch from.
+# workspace = "~/code/the-project"
+
 # Host to pin sessions to. Omitted means "the first online host", which is
 # right for a single box. A session with no host gets no runner and every
 # message to it is refused.
@@ -45,6 +50,10 @@ reviewer_agent = "codex-native-ui"
 # edit the same files. Unset, everything shares `workspace` — fine for one run
 # at a time, wrong the moment there are two. Worktrees are not cleaned up: the
 # branch is the iteration's output. `git worktree prune` when you have read them.
+# Needs `workspace` above to be set: a worktree is a second checkout of a
+# repository, so without one to branch from there is nothing to isolate and
+# every run shares a directory. The loop warns and continues if you set only
+# this one.
 worktrees = "~/.omnigent/army/worktrees"
 
 [lanes]
