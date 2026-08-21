@@ -314,3 +314,45 @@ def test_a_full_lane_holds_the_run_rather_than_failing_it(store: Store) -> None:
     run = store.list_runs()[0]
     assert run.state is RunState.READY
     assert run.attempt == 0, "a run held by backpressure has not attempted anything"
+
+
+def test_a_stuck_run_is_eventually_failed(store: Store) -> None:
+    """A transient error retried forever looks like progress from outside.
+
+    The loop keeps ticking, the report says "unchanged", and nothing ever
+    happens — which is worse than failing, because nobody goes looking.
+    """
+    from army.supervisor import STALL_SECONDS
+
+    omni, workload = FakeOmni(), DemoWorkload()
+    workload.ready_after = 10_000  # never finishes collecting
+    supervisor = Supervisor(store, omni, workload)
+    supervisor.tick(now=1_000)
+    supervisor.tick(now=1_000)
+    assert store.list_runs()[0].state is RunState.COLLECTING
+
+    supervisor.tick(now=1_000 + STALL_SECONDS + 1)
+
+    run = store.list_runs()[0]
+    assert run.state is RunState.FAILED
+    assert "stuck in collecting" in (run.terminal_reason or "")
+
+
+def test_waiting_on_a_human_is_never_stuck(store: Store) -> None:
+    """Waiting overnight is the design, not a stall.
+
+    D8's whole point is that the loop waits for an answer that may come the
+    next morning. A stall guard that fails those is a stall guard that breaks
+    the feature it was added to protect.
+    """
+    from army.supervisor import STALL_SECONDS
+
+    omni, workload = FakeOmni(), DemoWorkload()
+    run = _drive_to_waiting(store, omni, workload)
+    supervisor = Supervisor(store, omni, workload)
+
+    supervisor.tick(now=run.updated_at + STALL_SECONDS * 24)
+
+    after = store.get_run(run.id)
+    assert after is not None
+    assert after.state is RunState.WAITING_HUMAN

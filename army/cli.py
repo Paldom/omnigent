@@ -198,27 +198,36 @@ def build_parser() -> argparse.ArgumentParser:
 
     :returns: The parser.
     """
+    # --config and -v live on the subcommands, not above them, so
+    # `army run --once -v` works — which is what people type. Sharing them via
+    # a parent parser that is ALSO applied to the top level looks tidier and is
+    # a trap: the subparser writes its own default over whatever the top-level
+    # parse captured, so `army --config x status` silently runs with no config.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--config", type=Path, help="path to army.toml")
+    common.add_argument("-v", "--verbose", action="store_true")
+
     parser = argparse.ArgumentParser(prog="army", description=__doc__)
-    parser.add_argument("--config", type=Path, help="path to army.toml")
-    parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run = sub.add_parser("run", help="drive the loop")
+    run = sub.add_parser("run", help="drive the loop", parents=[common])
     run.add_argument("--interval", type=float, default=10.0, help="seconds between ticks")
     run.add_argument("--once", action="store_true", help="tick once and exit")
     run.set_defaults(func=cmd_run)
 
-    status = sub.add_parser("status", help="show runs and outstanding questions")
+    status = sub.add_parser("status", help="show runs and outstanding questions", parents=[common])
     status.add_argument("--limit", type=int, default=20)
     status.set_defaults(func=cmd_status)
 
     for name, help_text in (("approve", "approve a parked run"), ("deny", "decline it")):
-        answer = sub.add_parser(name, help=help_text)
+        answer = sub.add_parser(name, help=help_text, parents=[common])
         answer.add_argument("run", help="run id or unambiguous prefix")
         answer.add_argument("--choice", help="which option, for a multi-option question")
         answer.set_defaults(func=cmd_answer)
 
-    effects = sub.add_parser("effects", help="list side effects with an unknown outcome")
+    effects = sub.add_parser(
+        "effects", help="list side effects with an unknown outcome", parents=[common]
+    )
     effects.set_defaults(func=cmd_effects)
     return parser
 

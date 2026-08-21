@@ -42,11 +42,28 @@ class DemoWorkload:
         implementer_agent: str = "implementer",
         reviewer_agent: str = "reviewer",
         workspace: str | None = None,
+        host_id: str | None = None,
     ) -> None:
         self.queue_path = Path(queue_path).expanduser()
         self.implementer_agent = implementer_agent
         self.reviewer_agent = reviewer_agent
         self.workspace = workspace
+        self.host_id = host_id
+        # Resolved once per process, on first use. The names in army.toml are
+        # what a person writes; the API wants the ids it minted.
+        self._agent_ids: dict[str, str] = {}
+
+    def _host(self, omni: OmniClient) -> str | None:
+        """Resolve the host to pin sessions to, asking the server if unset."""
+        if self.host_id is None:
+            self.host_id = omni.default_host()
+        return self.host_id
+
+    def _agent_id(self, name: str, omni: OmniClient) -> str:
+        """Resolve a configured agent name to its id, caching the answer."""
+        if name not in self._agent_ids:
+            self._agent_ids[name] = omni.resolve_agent(name)
+        return self._agent_ids[name]
 
     # ── the five seams ────────────────────────────────────────────
 
@@ -72,10 +89,18 @@ class DemoWorkload:
         would hold a second vendor lane open doing nothing.
         """
         task = run.payload.get("task", "")
+        # The title carries the run id so it is a stable idempotency key: a
+        # dispatch that crashed after creating the session finds it again on
+        # the retry instead of orphaning it and starting a second one.
+        title = f"{_title(task)}-{run.id[:8]}"
+        session_id = omni.find_session(title)
+        if session_id is not None:
+            return [session_id]
         session_id = omni.create_session(
-            self.implementer_agent,
-            title=_title(task),
+            self._agent_id(self.implementer_agent, omni),
+            title=title,
             workspace=self.workspace,
+            host_id=self._host(omni),
         )
         omni.send(
             session_id,
@@ -104,10 +129,12 @@ class DemoWorkload:
 
         reviewer_id = run.artifacts.get("reviewer_session")
         if reviewer_id is None:
-            reviewer_id = omni.create_session(
-                self.reviewer_agent,
-                title=f"review {_title(run.payload.get('task', ''))}",
+            review_title = f"review-{_title(run.payload.get('task', ''))}-{run.id[:8]}"
+            reviewer_id = omni.find_session(review_title) or omni.create_session(
+                self._agent_id(self.reviewer_agent, omni),
+                title=review_title,
                 workspace=self.workspace,
+                host_id=self._host(omni),
             )
             omni.send(
                 reviewer_id,

@@ -127,6 +127,43 @@ class OmniClient:
             return False
         return True
 
+    def default_host(self) -> str | None:
+        """
+        Return an online host to pin sessions to, if there is one.
+
+        A session with no host gets no runner, and every message to it is
+        refused. Picking the first online host is right for the single-box
+        deployment this is built for; name one explicitly in config if there
+        is more than one.
+
+        :returns: A host id, or ``None`` when no host is online.
+        """
+        hosts = self._request("GET", "/v1/hosts").get("hosts") or []
+        for host in hosts:
+            if host.get("status") == "online":
+                return str(host["host_id"])
+        return None
+
+    def resolve_agent(self, name_or_id: str) -> str:
+        """
+        Turn an agent name into its id, passing an id straight through.
+
+        Configuration names agents the way people do — ``claude``, ``marshal``
+        — while the API wants the uuid it minted. Resolving here rather than
+        making the operator paste ids keeps ``army.toml`` readable, and turns a
+        typo into a clear error instead of a 404 from a session create.
+
+        :param name_or_id: An agent name or an agent id.
+        :returns: The agent id.
+        :raises OmniError: If nothing matches.
+        """
+        agents = self._request("GET", "/v1/agents").get("data") or []
+        for agent in agents:
+            if agent.get("id") == name_or_id or agent.get("name") == name_or_id:
+                return str(agent["id"])
+        known = ", ".join(sorted(str(a.get("name")) for a in agents)) or "none"
+        raise OmniError(f"no agent named {name_or_id!r}; this server has: {known}")
+
     def create_session(
         self,
         agent_id: str,
@@ -134,6 +171,7 @@ class OmniClient:
         title: str | None = None,
         harness: str | None = None,
         workspace: str | None = None,
+        host_id: str | None = None,
     ) -> str:
         """
         Start a session and return its id.
@@ -144,6 +182,9 @@ class OmniClient:
             iterations.
         :param harness: Harness override, or ``None`` for the agent's own.
         :param workspace: Working directory for the session, e.g. a worktree.
+        :param host_id: Host to pin the session to. Without one no runner is
+            bound, and every message to the session is refused with
+            ``runner_unavailable`` — so an unattended loop needs this set.
         :returns: The new session id.
         """
         body: dict[str, Any] = {"agent_id": agent_id}
@@ -153,6 +194,8 @@ class OmniClient:
             body["harness"] = harness
         if workspace is not None:
             body["workspace"] = workspace
+        if host_id is not None:
+            body["host_id"] = host_id
         response = self._request("POST", "/v1/sessions", body)
         return str(response["id"])
 
@@ -160,14 +203,42 @@ class OmniClient:
         """
         Send a message to a session.
 
+        ``content`` is a list of typed parts, not a bare string — the same
+        shape the UI posts, so an agent sees an identical message however it
+        was sent.
+
         :param session_id: Session to send to.
         :param text: The message.
         """
         self._request(
             "POST",
             f"/v1/sessions/{session_id}/events",
-            {"type": "message", "data": {"role": "user", "content": text}},
+            {
+                "type": "message",
+                "data": {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                },
+            },
         )
+
+    def find_session(self, title: str) -> str | None:
+        """
+        Find an existing session by exact title.
+
+        Lets a workload make session creation idempotent: derive a title from
+        something stable about the iteration, look before creating, and a
+        re-dispatch after a crash picks the session back up instead of leaving
+        an orphan behind and starting a second one.
+
+        :param title: The exact title to look for.
+        :returns: The session id, or ``None`` when nothing matches.
+        """
+        response = self._request("GET", "/v1/sessions?limit=100")
+        for session in response.get("data") or []:
+            if session.get("title") == title:
+                return str(session["id"])
+        return None
 
     def get_session(self, session_id: str) -> Session:
         """

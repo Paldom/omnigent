@@ -33,6 +33,14 @@ _logger = logging.getLogger(__name__)
 #: rest of the loop needs.
 MAX_ATTEMPTS = 3
 
+#: How long a run may sit in a working state without its version moving before
+#: the supervisor calls it stuck. A transient error retried forever looks
+#: exactly like progress from outside — the loop keeps ticking and nothing ever
+#: changes — so the retry has to be bounded by something. Generous, because
+#: agent turns are genuinely slow; ``WAITING_HUMAN`` is exempt, since waiting is
+#: the whole point of that state.
+STALL_SECONDS = 3600
+
 #: What a decision maps to when the workload does not say.
 _DECISION_STATES = {
     "continue": RunState.CONTINUE,
@@ -152,6 +160,16 @@ class Supervisor:
         :param now: Unix epoch seconds.
         :returns: The run after its move, or ``None`` if it stayed put.
         """
+        # WAITING_HUMAN is exempt: a run parked on a person is not stuck, it is
+        # doing exactly what it was asked to. Everything else moving its version
+        # is what progress looks like, so a version that has not moved in an
+        # hour means the retry loop is not getting anywhere.
+        if run.state is not RunState.WAITING_HUMAN and now - run.updated_at > STALL_SECONDS:
+            return self._fail(
+                run,
+                f"stuck in {run.state.value} for {(now - run.updated_at) // 60} minutes",
+                now=now,
+            )
         if run.state is RunState.READY:
             return self._dispatch(run, now=now)
         if run.state is RunState.DISPATCHING:
