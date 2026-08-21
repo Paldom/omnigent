@@ -164,6 +164,36 @@ tick: started=0 advanced=1 unchanged=0 failed=0     # v5 -> v6, once
 The version is the fencing token. It moves by exactly one, and ticking again
 after an answer does not move it a second time.
 
+### Answering from a phone
+
+You do not need the terminal. The question is posted into the session, and the
+Omnigent web UI already runs on a phone — so reply there with one of the
+options and the loop picks it up on its next tick:
+
+```
+marshal   Implemented and reviewed by a different vendor. Continue?
+          Options: merge, iterate, discard, stop
+          Answer with: army approve 7b7b40f3f658 --choice <option>
+          — or just reply with one option.
+
+you       merge
+```
+
+```
+$ army run --once
+answered in chat: merge
+tick: started=0 advanced=1 unchanged=0 failed=0
+```
+
+Either route becomes the same durable command, consumed exactly once. The
+reply is matched narrowly: it must name exactly one option, so `ship` answers
+and `ship or iterate, I can't decide` does not — a gate that guesses at an
+ambiguous answer is worse than one that waits.
+
+Replies are read from consumed items *and* from queued pending inputs, because
+a run parked overnight often has no live runner behind it and an answer given
+to a dead worker still has to count.
+
 ### Where the question appears
 
 The barrier lives in `army`, not in Omnigent, and that is deliberate rather
