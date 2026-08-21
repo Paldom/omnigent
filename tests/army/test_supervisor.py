@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from army.lanes import Lane, Lanes
+from army.lanes import Lane, Lanes, limit_phrase_in
 from army.omni import OmniError
 from army.state import Command, CommandKind, IllegalTransition, Run, RunState
 from army.store import ConcurrentTransition, Store
@@ -35,6 +35,7 @@ class FakeOmni:
         self.fail_dispatch: OmniError | None = None
         self.replies: list[str] = []
         self.harness: str | None = None
+        self.tail: str = ""
 
     def create_session(self, agent_id: str, **kwargs: Any) -> str:
         session_id = f"conv_{len(self.sessions):032d}"
@@ -53,6 +54,7 @@ class FakeOmni:
             status="idle",
             harness=self.harness,
             pending_elicitations=[],
+            tail=self.tail,
         )
 
     def replies_after(self, session_id: str, marker: str) -> list[str]:
@@ -601,6 +603,94 @@ def test_an_unconfigured_harness_is_reported_not_silently_uncounted() -> None:
 
     assert lanes.acquire(1, "grok") is False
     assert lanes.acquire(1, "claude-sdk") is True
+
+
+# ── a vendor quota refusal is not finished work ────────────
+
+
+def test_a_quota_refusal_cools_the_lane_instead_of_collecting_it(store: Store) -> None:
+    """A vendor that refuses on quota must not read as a completed iteration.
+
+    The session stops running, so without this the workload collects it, the
+    reviewer reviews a branch nobody wrote to, and the human is asked to
+    approve work that never happened. Cooling the lane and requeueing is the
+    honest move: nothing failed, a subscription ran out for a while.
+    """
+    lanes = Lanes([Lane("claude-sdk", max_concurrent=4)])
+    omni = FakeOmni()
+    omni.harness = "claude-sdk"
+    omni.tail = "I cannot continue: usage limit reached. Try again later."
+    supervisor = Supervisor(store, omni, DemoWorkload(), lanes=lanes)
+
+    supervisor.tick()  # open
+    supervisor.tick()  # dispatch
+    supervisor.tick()  # collect -> sees the refusal
+
+    run = store.list_runs()[0]
+    assert run.state is RunState.READY
+    assert run.outstanding == []
+    assert run.terminal_reason is None
+    # The lane is asleep, so the requeued run does not go straight back to the
+    # vendor that just refused it.
+    assert lanes.has_capacity() is False
+
+
+def test_a_cooled_lane_does_not_burn_the_attempt_counter(store: Store) -> None:
+    """Waiting out a limit must cost time, not retries.
+
+    ``_dispatch`` returns before incrementing when no lane has capacity, so a
+    limit that outlasts several ticks leaves the run's attempts where they
+    were — otherwise a long quota window would exhaust MAX_ATTEMPTS and fail an
+    iteration that never actually went wrong.
+    """
+    lanes = Lanes([Lane("claude-sdk", max_concurrent=4)])
+    omni = FakeOmni()
+    omni.harness = "claude-sdk"
+    omni.tail = "usage limit reached"
+    supervisor = Supervisor(store, omni, DemoWorkload(), lanes=lanes)
+
+    supervisor.tick()
+    supervisor.tick()
+    supervisor.tick()
+    attempts_when_cooled = store.list_runs()[0].attempt
+    for _ in range(3):
+        supervisor.tick()
+
+    run = store.list_runs()[0]
+    assert run.state is RunState.READY
+    assert run.attempt == attempts_when_cooled
+
+
+def test_an_ordinary_session_is_collected_normally(store: Store) -> None:
+    """The check must not fire on a session that said nothing about quota."""
+    lanes = Lanes([Lane("claude-sdk", max_concurrent=4)])
+    omni = FakeOmni()
+    omni.harness = "claude-sdk"
+    omni.tail = "Done. The tests pass and the branch is pushed."
+    supervisor = Supervisor(store, omni, DemoWorkload(), lanes=lanes)
+
+    supervisor.tick()
+    supervisor.tick()
+    supervisor.tick()
+
+    assert store.list_runs()[0].state is not RunState.READY
+
+
+def test_a_human_quoting_the_error_cannot_cool_a_lane() -> None:
+    """Only what the vendor said counts.
+
+    ``_tail_of`` drops user messages for the same reason ``replies_after``
+    does: a person pasting an error into the session must not be able to drive
+    the machinery that reads it.
+    """
+    from army.omni import _tail_of
+
+    def _msg(role: str, text: str) -> dict[str, Any]:
+        return {"type": "message", "data": {"role": role, "content": [{"text": text}]}}
+
+    items = [_msg("user", "usage limit reached?"), _msg("assistant", "No, we are fine.")]
+
+    assert limit_phrase_in(_tail_of(items)) is None
 
 
 # ── worktree isolation ─────────────────────────────────────

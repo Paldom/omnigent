@@ -19,7 +19,7 @@ from typing import Any
 
 import tomllib
 
-from army.lanes import DEFAULT_LANES
+from army.lanes import DEFAULT_LANES, DEFAULT_LIMIT_PHRASES
 from army.workload import Workload
 
 #: Where to look for the file when none is named, in order.
@@ -42,6 +42,9 @@ class Config:
     :param workload_options: Keyword arguments for the workload's constructor.
     :param lanes: Per-harness concurrency caps.
     :param max_concurrent_runs: Iterations allowed in flight at once.
+    :param limit_phrases: Text that means a vendor refused on quota. Vendor
+        wording differs and changes, and a phrase that never matches fails
+        silently, so this is configurable rather than compiled in.
     """
 
     server_url: str = "http://localhost:6767"
@@ -51,6 +54,7 @@ class Config:
     workload_options: dict[str, Any] = field(default_factory=dict)
     lanes: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_LANES))
     max_concurrent_runs: int = 3
+    limit_phrases: tuple[str, ...] = DEFAULT_LIMIT_PHRASES
 
     def load_workload(self) -> Workload:
         """
@@ -101,6 +105,12 @@ def load_config(path: Path | None = None) -> Config:
         config.workload_options = dict(data["workload_options"])
     if isinstance(data.get("lanes"), dict):
         config.lanes = {str(k): int(v) for k, v in data["lanes"].items()}
+    rate_limit = data.get("rate_limit")
+    if isinstance(rate_limit, dict) and isinstance(rate_limit.get("phrases"), list):
+        # Replaces rather than extends: an operator who has watched their own
+        # vendors refuse knows better than this file's defaults, and a list you
+        # cannot narrow is one you cannot debug.
+        config.limit_phrases = tuple(str(p).lower() for p in rate_limit["phrases"])
 
     # Read last so an environment token always beats a file that should not
     # have contained one in the first place.

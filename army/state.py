@@ -61,7 +61,14 @@ RESUMABLE: frozenset[RunState] = frozenset({RunState.PAUSED})
 LEGAL: dict[RunState, frozenset[RunState]] = {
     RunState.READY: frozenset({RunState.DISPATCHING, RunState.COMPLETED, RunState.FAILED}),
     RunState.DISPATCHING: frozenset({RunState.COLLECTING, RunState.FAILED}),
-    RunState.COLLECTING: frozenset({RunState.COLLECTING, RunState.EVALUATING, RunState.FAILED}),
+    # READY is the quota exit: a vendor that refused on subscription limit
+    # produced no work to evaluate and nothing that failed, so the iteration
+    # goes back to the start of the queue and waits for the lane to wake. Same
+    # reasoning as PAUSED below — what it was collecting is gone, so
+    # re-dispatching is the only honest move.
+    RunState.COLLECTING: frozenset(
+        {RunState.COLLECTING, RunState.EVALUATING, RunState.READY, RunState.FAILED}
+    ),
     RunState.EVALUATING: frozenset({RunState.WAITING_HUMAN, RunState.FAILED}),
     RunState.WAITING_HUMAN: frozenset(
         {RunState.CONTINUE, RunState.PAUSED, RunState.COMPLETED, RunState.FAILED}

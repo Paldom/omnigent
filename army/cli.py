@@ -38,7 +38,11 @@ def _build(config: Config) -> tuple[Store, Supervisor]:
     """
     store = Store(config.state_path)
     omni = OmniClient(config.server_url, token=config.token)
-    lanes = Lanes.from_config(config.lanes) if config.lanes else None
+    lanes = (
+        Lanes.from_config(config.lanes, limit_phrases=config.limit_phrases)
+        if config.lanes
+        else None
+    )
     workload = config.load_workload()
     supervisor = Supervisor(
         store,

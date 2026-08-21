@@ -18,6 +18,38 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any
+
+#: Text a vendor prints when a subscription hits its ceiling.
+#:
+#: Omnigent normalises no such signal — its own 429 means the control-plane API
+#: throttled *us*, and a subscription limit arrives as words inside a turn. So
+#: this is a literal-substring list, matched case-insensitively, and it is
+#: deliberately short: a pattern loose enough to catch every vendor also fires
+#: when an agent merely *discusses* rate limits, and cooling a lane that was
+#: never limited idles capacity for no reason.
+#:
+#: Only phrases observed in the wild belong here. Override the list in
+#: ``army.toml`` under ``[rate_limit] phrases = [...]`` rather than guessing at
+#: vendor wording — a phrase that never matches is silent, which is the failure
+#: mode that hurts.
+DEFAULT_LIMIT_PHRASES: tuple[str, ...] = (
+    "usage limit reached",
+    "rate limit exceeded",
+    "too many requests",
+)
+
+
+def limit_phrase_in(text: str, phrases: tuple[str, ...] = DEFAULT_LIMIT_PHRASES) -> str | None:
+    """
+    Return the vendor-limit phrase *text* contains, or ``None``.
+
+    :param text: Session text to search, typically the tail of a transcript.
+    :param phrases: Literal substrings to look for, case-insensitively.
+    :returns: The first phrase that matched, for the log line, or ``None``.
+    """
+    lowered = text.lower()
+    return next((phrase for phrase in phrases if phrase in lowered), None)
 
 
 @dataclass
@@ -53,14 +85,24 @@ class Lanes:
 
     :param lanes: One :class:`Lane` per harness the loop dispatches to.
     :param default_cooldown_seconds: How long a rate-limited lane sleeps.
+    :param limit_phrases: Text that means a vendor refused on quota. Defaults
+        to :data:`DEFAULT_LIMIT_PHRASES`; operators add their vendor's wording
+        rather than waiting for this file to learn it.
     """
 
-    def __init__(self, lanes: list[Lane], *, default_cooldown_seconds: int = 300) -> None:
+    def __init__(
+        self,
+        lanes: list[Lane],
+        *,
+        default_cooldown_seconds: int = 300,
+        limit_phrases: tuple[str, ...] = DEFAULT_LIMIT_PHRASES,
+    ) -> None:
         self._lanes: dict[str, Lane] = {lane.harness: lane for lane in lanes}
         self.default_cooldown_seconds = default_cooldown_seconds
+        self.limit_phrases = limit_phrases
 
     @staticmethod
-    def from_config(config: dict[str, int], **kwargs: int) -> Lanes:
+    def from_config(config: dict[str, int], **kwargs: Any) -> Lanes:
         """
         Build lanes from a ``{harness: max_concurrent}`` mapping.
 
@@ -69,6 +111,15 @@ class Lanes:
         :returns: The configured lanes.
         """
         return Lanes([Lane(harness, cap) for harness, cap in config.items()], **kwargs)
+
+    def limit_phrase(self, text: str) -> str | None:
+        """
+        Return the configured limit phrase *text* contains, or ``None``.
+
+        :param text: Session text to search.
+        :returns: The phrase that matched, for the log line, or ``None``.
+        """
+        return limit_phrase_in(text, self.limit_phrases)
 
     def has_capacity(self, *, now: int | None = None) -> bool:
         """
@@ -165,13 +216,10 @@ class Lanes:
         the others, and stopping the whole loop for it would waste the capacity
         that is still there.
 
-        **Nothing calls this yet, deliberately.** Omnigent surfaces no
-        normalised vendor rate-limit signal: its own 429 means the control-plane
-        API throttled *us*, which says nothing about any vendor, and a
-        subscription limit shows up inside a turn as a failed session rather
-        than as a typed event. Cooling a vendor lane on the wrong signal would
-        idle capacity that was never limited, so this stays a seam until the
-        signal exists — that is upstream OMNI-11 / #857.
+        The supervisor calls this when a collected session's tail matches
+        :data:`DEFAULT_LIMIT_PHRASES`. That is a text match rather than a typed
+        event because Omnigent normalises no vendor rate-limit signal — see
+        that constant for why the list stays literal and short.
 
         :param harness: The lane that hit the limit.
         :param seconds: How long to sleep, or ``None`` for the default.

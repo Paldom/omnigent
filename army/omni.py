@@ -50,6 +50,9 @@ class Session:
         ``"claude-native"``. Authoritative in a way a caller's intent is not —
         an override can be refused, and a spec's own harness wins by default.
     :param pending_elicitations: Outstanding approval prompts on the session.
+    :param tail: The last few non-user messages, joined. A vendor that refuses
+        on quota says so here and nowhere else, so this is what the rate-limit
+        check reads.
     """
 
     id: str
@@ -57,6 +60,7 @@ class Session:
     status: str | None
     harness: str | None
     pending_elicitations: list[dict[str, Any]]
+    tail: str = ""
 
 
 def barrier_marker(run_id: str) -> str:
@@ -81,6 +85,38 @@ def _text_of(content: Any) -> str:
         for part in content
         if isinstance(part, dict) and part.get("text")
     ).strip()
+
+
+#: How many trailing messages count as the tail. A vendor refusal is the last
+#: thing a session says, so this only has to be deep enough to survive a
+#: closing pleasantry after it.
+_TAIL_MESSAGES = 5
+
+
+def _tail_of(items: Any) -> str:
+    """
+    Join the last few non-user messages in a session snapshot.
+
+    User text is excluded for the same reason it is excluded from
+    :meth:`OmniClient.replies_after`: a human quoting an error must not be able
+    to trigger the machinery that reads it.
+
+    :param items: The snapshot's ``items`` list, or anything else.
+    :returns: The joined tail, or ``""`` when there is nothing to read.
+    """
+    if not isinstance(items, list):
+        return ""
+    said: list[str] = []
+    for item in items:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        data = item.get("data") or {}
+        if data.get("role") == "user":
+            continue
+        text = _text_of(data.get("content"))
+        if text:
+            said.append(text)
+    return "\n".join(said[-_TAIL_MESSAGES:])
 
 
 class OmniClient:
@@ -333,6 +369,7 @@ class OmniClient:
             status=data.get("status"),
             harness=data.get("harness"),
             pending_elicitations=data.get("pending_elicitations") or [],
+            tail=_tail_of(data.get("items")),
         )
 
     def resolve_elicitation(

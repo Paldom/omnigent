@@ -58,3 +58,20 @@ antigravity-native = 2
 grok = 2
 kimi-native = 2
 pi-native = 2
+
+[rate_limit]
+# What a vendor says when a subscription hits its ceiling. Matched
+# case-insensitively against the tail of a finished session; a match cools that
+# vendor's lane and puts the iteration back in the queue instead of collecting
+# a refusal as if it were finished work.
+#
+# Setting this replaces the defaults, so include the ones you still want. Keep
+# the strings literal and specific: something as loose as "limit" also fires
+# when an agent merely mentions one, and cooling a lane that was never limited
+# idles capacity for nothing. Watch your own vendors refuse, then paste what
+# they actually said.
+phrases = [
+  "usage limit reached",
+  "rate limit exceeded",
+  "too many requests",
+]

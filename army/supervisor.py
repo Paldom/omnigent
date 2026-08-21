@@ -284,6 +284,9 @@ class Supervisor:
 
     def _collect(self, run: Run, *, now: int) -> Run | None:
         """Gather finished work; stay in ``COLLECTING`` until it is all in."""
+        limited = self._rate_limited_lane(run)
+        if limited is not None:
+            return self._requeue_rate_limited(run, limited, now=now)
         try:
             done, artifacts = self.workload.collect(run, self.omni)
         except OmniError as exc:
@@ -303,6 +306,67 @@ class Supervisor:
         return self.store.transition(
             run, RunState.EVALUATING, artifacts=merged, outstanding=[], now=now
         )
+
+    def _rate_limited_lane(self, run: Run) -> tuple[str, str, str] | None:
+        """
+        Find an outstanding session whose vendor refused it on quota.
+
+        Without this the loop reads a quota refusal as finished work: the
+        session is no longer ``running``, so the workload collects it, the
+        reviewer reviews an empty branch, and the human is asked to approve
+        something nobody did.
+
+        :param run: The run being collected.
+        :returns: ``(session_id, harness, phrase)`` for the first limited
+            session, or ``None``. Best-effort — a session that cannot be read
+            is not evidence of a limit.
+        """
+        if self.lanes is None:
+            return None
+        for session_id in run.outstanding:
+            try:
+                session = self.omni.get_session(session_id)
+            except OmniError as exc:
+                _logger.warning("could not read %s while collecting: %s", session_id, exc)
+                continue
+            if session.status == "running" or session.harness is None:
+                continue
+            phrase = self.lanes.limit_phrase(session.tail)
+            if phrase is not None:
+                return session_id, session.harness, phrase
+        return None
+
+    def _requeue_rate_limited(
+        self, run: Run, limited: tuple[str, str, str], *, now: int
+    ) -> Run | None:
+        """
+        Cool the vendor's lane and put the run back in the queue.
+
+        Back to ``READY`` rather than ``FAILED``: nothing went wrong with the
+        work, a subscription simply ran out for a while. The cooled lane is
+        what stops it going straight back to the same vendor —
+        :meth:`_dispatch` returns before incrementing the attempt counter when
+        no lane has capacity, so a long limit costs waiting rather than
+        attempts.
+
+        :param run: The run whose session was refused.
+        :param limited: ``(session_id, harness, phrase)`` from
+            :meth:`_rate_limited_lane`.
+        :param now: Unix epoch seconds.
+        :returns: The requeued run, or ``None`` if another writer won the race.
+        """
+        session_id, harness, phrase = limited
+        assert self.lanes is not None
+        self.lanes.rate_limited(harness)
+        self.lanes.release(len(run.outstanding))
+        _logger.warning(
+            "run %s: %s hit a %r limit on session %s — cooling that lane and requeueing",
+            run.id,
+            harness,
+            phrase,
+            session_id,
+        )
+        return self.store.transition(run, RunState.READY, outstanding=[], now=now)
 
     def _ask(self, run: Run, *, now: int) -> Run | None:
         """Put the question to the human and park on the answer."""
