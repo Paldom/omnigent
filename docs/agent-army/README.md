@@ -145,6 +145,43 @@ army deny a3f9c2
 army effects                     # external actions whose outcome a crash left unknown
 ```
 
+A real run looks like this:
+
+```
+t1  | f2e4833ba3c0  ready          v0
+t2  | f2e4833ba3c0  collecting     v2      # implementer dispatched
+t5  | f2e4833ba3c0  collecting     v3      # reviewer dispatched, on another vendor
+t6  | f2e4833ba3c0  evaluating     v4
+t7  | f2e4833ba3c0  waiting_human  v5      <- waiting on you
+
+$ army approve f2e4833ba3c0 --choice merge
+recorded approve for f2e4833ba3c0; the loop applies it on its next tick
+
+$ army run --once
+tick: started=0 advanced=1 unchanged=0 failed=0     # v5 -> v6, once
+```
+
+The version is the fencing token. It moves by exactly one, and ticking again
+after an answer does not move it a second time.
+
+### Where the question appears
+
+The barrier lives in `army`, not in Omnigent, and that is deliberate rather
+than a limitation. There is no client-initiated way to raise an Omnigent
+elicitation — the session event API takes `approval` and `mcp_elicitation`, but
+both are *answers* to something a policy or an MCP server already asked.
+
+Even if there were one, inside a turn is the wrong place for this barrier: a
+policy ASK raised mid-turn is collapsed to DENY outside the INPUT phase
+([#765](https://github.com/omnigent-ai/omnigent/issues/765)), and a turn parked
+on one trips the harness idle watchdog
+([#4854](https://github.com/omnigent-ai/omnigent/issues/4854)). Something that
+has to survive until the next morning cannot be a parked turn.
+
+So the question is *posted into the session as a message* — visible where the
+work happened, readable from a phone — while the barrier that actually gates
+the loop is a row here, answered with `army approve`.
+
 ---
 
 ## Doing your own work with it
