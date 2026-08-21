@@ -11,8 +11,9 @@ definition of done.
 
 | Change | Why it is here | Upstream | Retires when |
 |---|---|---|---|
-| Persist outstanding elicitations | An approval outstanding when the server restarts is lost, while the sidebar badge — which *is* persisted — keeps asserting one is waiting. The loop ends every iteration in an approval, so this is on the critical path. | [#5144](https://github.com/omnigent-ai/omnigent/issues/5144), PR pending | the PR merges |
+| Persist outstanding elicitations | An approval outstanding when the server restarts is lost, while the sidebar badge — which *is* persisted — keeps asserting one is waiting. The loop ends every iteration in an approval, so this is on the critical path. | [#5144](https://github.com/omnigent-ai/omnigent/issues/5144) · [PR #5151](https://github.com/omnigent-ai/omnigent/pull/5151) | the PR merges |
 | Document the Grok Build and Devin harnesses | Both are builtin harnesses with no user-facing mention anywhere, so `--harness grok` is undiscoverable. | [PR #5148](https://github.com/omnigent-ai/omnigent/pull/5148) | the PR merges |
+| Skills / hooks / MCP / plan-mode capability axes | Nothing in the capability model can say whether a harness can load a skill, so the answer lives only in the runner's relay code. The roster needs it to route work away from harnesses that cannot do the job. | [#5152](https://github.com/omnigent-ai/omnigent/issues/5152) · [PR #5153](https://github.com/omnigent-ai/omnigent/pull/5153) | the PR merges |
 
 ## Not patches — additions alongside
 
@@ -37,3 +38,7 @@ rebase and are not counted as delta:
 - Measure the cost. If a monthly rebase starts taking more than a day, the
   economics of carrying this privately have changed and the answer is to push
   harder on upstreaming, not to carry more.
+- `scripts/sync-upstream.sh` does the fetch, the merge and the re-checks, and
+  tells you which rows above upstream has since merged. Run it often — upstream
+  lands roughly a hundred issues a week, so a fork that syncs monthly conflicts
+  monthly.
