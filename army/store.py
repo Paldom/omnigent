@@ -19,7 +19,16 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from army.state import Command, CommandKind, Run, RunState, assert_legal, dumps, loads
+from army.state import (
+    RESUMABLE,
+    Command,
+    CommandKind,
+    Run,
+    RunState,
+    assert_legal,
+    dumps,
+    loads,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -62,6 +71,12 @@ CREATE TABLE IF NOT EXISTS effects (
     updated_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_effects_run ON effects (run_id, state);
+
+CREATE TABLE IF NOT EXISTS used_grants (
+    id          TEXT PRIMARY KEY,
+    operation   TEXT NOT NULL,
+    consumed_at INTEGER NOT NULL
+);
 """
 
 
@@ -157,13 +172,23 @@ class Store:
         """
         working = [s.value for s in RunState if s not in _TERMINAL_VALUES]
         placeholders = ",".join("?" * len(working))
-        sql = f"SELECT * FROM runs WHERE state IN ({placeholders})"
-        params: list[Any] = list(working)
+        resumable = [s.value for s in RESUMABLE]
+        resumable_placeholders = ",".join("?" * len(resumable))
+        # A paused run is only picked up when a human has actually asked for
+        # it. Without the unconsumed-command condition it would either be
+        # invisible forever (the bug this replaces) or spin on every tick.
+        sql = (
+            f"SELECT runs.* FROM runs WHERE (runs.state IN ({placeholders})"
+            f" OR (runs.state IN ({resumable_placeholders}) AND EXISTS ("
+            "  SELECT 1 FROM commands WHERE commands.run_id = runs.id"
+            "  AND commands.consumed_at IS NULL)))"
+        )
+        params: list[Any] = [*working, *resumable]
         if workflow is not None:
-            sql += " AND workflow = ?"
+            sql += " AND runs.workflow = ?"
             params.append(workflow)
         with self._connect() as conn:
-            rows = conn.execute(sql + " ORDER BY created_at, id", params).fetchall()
+            rows = conn.execute(sql + " ORDER BY runs.created_at, runs.id", params).fetchall()
         return [_row_to_run(row) for row in rows]
 
     def list_runs(self, *, limit: int = 50) -> list[Run]:
@@ -321,6 +346,25 @@ class Store:
             consumed_at=row["consumed_at"],
         )
 
+    def consume_command(self, command: Command, *, now: int | None = None) -> None:
+        """
+        Mark a command consumed without moving the run.
+
+        For a command that cannot apply where the run has ended up — a verdict
+        that arrived after the branch was already paused, say. Leaving it
+        unconsumed would wake the run later with an answer to a question that
+        is no longer being asked.
+
+        :param command: The command to retire.
+        :param now: Unix epoch seconds; defaults to the clock.
+        """
+        stamp = int(time.time()) if now is None else now
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE commands SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL",
+                (stamp, command.id),
+            )
+
     # ── effects ───────────────────────────────────────────────────
 
     def begin_effect(
@@ -400,6 +444,32 @@ class Store:
                 "UPDATE effects SET state = ?, result = ?, updated_at = ? WHERE id = ?",
                 (state, dumps(result) if result is not None else None, stamp, effect_id),
             )
+
+    def consume_grant(self, grant_id: str, operation: str, *, now: int | None = None) -> bool:
+        """
+        Spend an owner grant, exactly once.
+
+        An HMAC that merely *validates* is a capability, not a permission: it
+        keeps working until it expires, so one approval of a transfer authorises
+        that transfer for the rest of the hour. Recording the id under a primary
+        key makes the second attempt lose — the insert is the lock.
+
+        :param grant_id: The grant's nonce.
+        :param operation: The verb, recorded for the audit trail.
+        :param now: Unix epoch seconds; defaults to the clock.
+        :returns: ``True`` if this call spent the grant, ``False`` if it was
+            already spent.
+        """
+        stamp = int(time.time()) if now is None else now
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO used_grants (id, operation, consumed_at) VALUES (?,?,?)",
+                    (grant_id, operation, stamp),
+                )
+        except sqlite3.IntegrityError:
+            return False
+        return True
 
     def unreconciled_effects(self) -> list[dict[str, Any]]:
         """

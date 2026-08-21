@@ -42,10 +42,18 @@ class RunState(str, Enum):
     FAILED = "failed"
 
 
-#: States from which no further transition is taken by the supervisor.
+#: States the supervisor does not advance on its own. ``PAUSED`` is here
+#: because only a human restarts it — but a ``RESUME`` command does exactly
+#: that, so it is resting rather than final.
 TERMINAL: frozenset[RunState] = frozenset(
     {RunState.CONTINUE, RunState.PAUSED, RunState.COMPLETED, RunState.FAILED}
 )
+
+#: The one state a human can bring a run back from. Everything else in
+#: :data:`TERMINAL` is genuinely final: a completed run is done, a failed one
+#: needs a new iteration rather than a resurrection, and ``CONTINUE`` has
+#: already handed off to the next.
+RESUMABLE: frozenset[RunState] = frozenset({RunState.PAUSED})
 
 #: The moves the supervisor may make. Anything not listed is a bug, and
 #: :func:`assert_legal` says so rather than letting a run reach a state no
@@ -59,7 +67,10 @@ LEGAL: dict[RunState, frozenset[RunState]] = {
         {RunState.CONTINUE, RunState.PAUSED, RunState.COMPLETED, RunState.FAILED}
     ),
     RunState.CONTINUE: frozenset(),
-    RunState.PAUSED: frozenset(),
+    # A paused branch goes back to the start of an iteration, not to wherever
+    # it was: the sessions it was collecting are long gone by the time someone
+    # resumes, so re-dispatching is the only honest move.
+    RunState.PAUSED: frozenset({RunState.READY}),
     RunState.COMPLETED: frozenset(),
     RunState.FAILED: frozenset(),
 }

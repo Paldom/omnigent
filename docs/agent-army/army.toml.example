@@ -35,6 +35,12 @@ reviewer_agent = "codex-native-ui"
 # message to it is refused.
 # host_id = "..."
 
+# Uncomment on a box with no working terminal: the *-native-ui agents wrap a
+# resident vendor TUI in tmux and fail the turn if it cannot start. A headless
+# harness has no such dependency. This must stay inside [workload_options] —
+# under [lanes] it would be read as a lane and fail at startup.
+# harness = "claude-sdk"
+
 [lanes]
 # Concurrent sessions per vendor. Every sub-agent on one harness shares that
 # harness's single login, so this is the real concurrency bound — not a global
@@ -46,8 +52,3 @@ antigravity-native = 2
 grok = 2
 kimi-native = 2
 pi-native = 2
-
-# Uncomment on a box with no working terminal: the *-native-ui agents wrap a
-# resident vendor TUI in tmux, and fail the turn if it cannot start. A headless
-# harness has no such dependency.
-# harness = "claude-sdk"

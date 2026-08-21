@@ -28,7 +28,9 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -87,23 +89,27 @@ def digest(operation: str, parameters: dict[str, Any]) -> str:
 
 @dataclass(frozen=True)
 class Grant:
-    """An owner's permission for one operation, for a while.
+    """An owner's permission for one operation, once.
 
     :param operation: The verb granted.
     :param digest: Fingerprint of the exact operation, from :func:`digest`.
     :param expires_at: Unix epoch seconds after which it is worthless.
-    :param signature: HMAC over the three fields above, made with a key the
+    :param nonce: Unique id for this grant. Signed, and spent on first use, so
+        the grant is a permission rather than a capability that keeps working
+        until it expires.
+    :param signature: HMAC over the four fields above, made with a key the
         agents' environment does not contain.
     """
 
     operation: str
     digest: str
     expires_at: int
+    nonce: str
     signature: str
 
     def to_token(self) -> str:
         """Render the grant as one line, for pasting into a chat reply."""
-        return f"{self.operation}.{self.digest}.{self.expires_at}.{self.signature}"
+        return f"{self.operation}.{self.digest}.{self.expires_at}.{self.nonce}.{self.signature}"
 
     @staticmethod
     def from_token(token: str) -> Grant:
@@ -115,14 +121,14 @@ class Grant:
         :raises GateRefused: If the token is not well formed.
         """
         parts = token.strip().split(".")
-        if len(parts) != 4:
+        if len(parts) != 5:
             raise GateRefused("malformed grant token")
-        operation, fingerprint, expires, signature = parts
+        operation, fingerprint, expires, nonce, signature = parts
         try:
             expires_at = int(expires)
         except ValueError as exc:
             raise GateRefused("malformed grant expiry") from exc
-        return Grant(operation, fingerprint, expires_at, signature)
+        return Grant(operation, fingerprint, expires_at, nonce, signature)
 
 
 class Broker:
@@ -134,17 +140,26 @@ class Broker:
     ``ARMY_GITHUB_TOKEN`` are absent from every environment an agent can read.
 
     :param key: Signing key. Defaults to ``ARMY_BROKER_KEY``.
+    :param spender: Something that spends a grant id exactly once — in practice
+        :meth:`army.store.Store.consume_grant`. Without it a grant can only be
+        *validated*, never spent, so the operations in :data:`ALWAYS_OWNER` are
+        refused outright rather than silently becoming reusable.
     :raises GateRefused: If no key is available — an unsigned broker would
         approve everything, so it refuses to exist instead.
     """
 
-    def __init__(self, key: str | None = None) -> None:
+    def __init__(
+        self,
+        key: str | None = None,
+        spender: Callable[[str, str], bool] | None = None,
+    ) -> None:
         resolved = key or os.environ.get("ARMY_BROKER_KEY")
         if not resolved:
             raise GateRefused(
                 "no ARMY_BROKER_KEY: refusing to start a broker that cannot verify grants"
             )
         self._key = resolved.encode()
+        self._spender = spender
 
     def sign(
         self,
@@ -153,24 +168,45 @@ class Broker:
         *,
         ttl_seconds: int = DEFAULT_GRANT_SECONDS,
         now: int | None = None,
+        owner_confirmed: bool = False,
     ) -> Grant:
         """
-        Issue a grant. Only the owner should be able to reach this.
+        Issue a grant.
+
+        An :data:`ALWAYS_OWNER` verb needs *owner_confirmed*. The list is the
+        settled risk posture, and a list nothing consults is a comment — any
+        code path that could reach this method could otherwise mint itself a
+        grant to spend money. Passing the flag is not authentication; it is a
+        marker that the call site is the owner path and not agent-reachable,
+        so it must never be threaded out to one.
 
         :param operation: The verb being granted.
         :param parameters: The exact arguments being granted.
         :param ttl_seconds: How long the grant lasts.
         :param now: Unix epoch seconds; defaults to the clock.
+        :param owner_confirmed: Set only on the owner's own path.
         :returns: The signed grant.
+        :raises GateRefused: For an :data:`ALWAYS_OWNER` verb without
+            *owner_confirmed*, or when nothing can spend the grant.
         """
+        if operation in ALWAYS_OWNER and not owner_confirmed:
+            raise GateRefused(
+                f"{operation} is owner-only; it cannot be granted from an automated path"
+            )
+        if operation in ALWAYS_OWNER and self._spender is None:
+            raise GateRefused(
+                f"{operation} needs a one-shot grant, and this broker has nowhere to spend one"
+            )
         stamp = int(time.time()) if now is None else now
         fingerprint = digest(operation, parameters)
         expires_at = stamp + ttl_seconds
+        nonce = secrets.token_hex(16)
         return Grant(
             operation=operation,
             digest=fingerprint,
             expires_at=expires_at,
-            signature=self._sign(operation, fingerprint, expires_at),
+            nonce=nonce,
+            signature=self._sign(operation, fingerprint, expires_at, nonce),
         )
 
     def check(
@@ -202,13 +238,25 @@ class Broker:
             )
         if stamp >= grant.expires_at:
             raise GateRefused(f"grant expired {stamp - grant.expires_at}s ago; ask again")
-        expected_signature = self._sign(operation, grant.digest, grant.expires_at)
+        expected_signature = self._sign(operation, grant.digest, grant.expires_at, grant.nonce)
         if not hmac.compare_digest(grant.signature, expected_signature):
             raise GateRefused("grant signature does not verify")
+        # Spend it last, so a grant is never consumed by a call that was going
+        # to be refused anyway. Binding to exact arguments stops the operation
+        # being *changed*; only spending stops it being *repeated*.
+        if self._spender is not None:
+            if not self._spender(grant.nonce, operation):
+                raise GateRefused(
+                    f"this {operation} grant has already been used; ask for a new one"
+                )
+        elif operation in ALWAYS_OWNER:
+            raise GateRefused(
+                f"{operation} needs a one-shot grant, and this broker has nowhere to spend one"
+            )
 
-    def _sign(self, operation: str, fingerprint: str, expires_at: int) -> str:
-        """Compute the HMAC over a grant's fields."""
-        message = f"{operation}.{fingerprint}.{expires_at}".encode()
+    def _sign(self, operation: str, fingerprint: str, expires_at: int, nonce: str) -> str:
+        """Compute the HMAC over a grant's fields, nonce included."""
+        message = f"{operation}.{fingerprint}.{expires_at}.{nonce}".encode()
         return hmac.new(self._key, message, hashlib.sha256).hexdigest()
 
 
@@ -225,14 +273,9 @@ def assert_agent_environment_is_clean(env: dict[str, str] | None = None) -> list
     :returns: Names of variables that should not be reachable, sorted.
     """
     environ = os.environ if env is None else env
-    leaked = []
-    for name in environ:
-        upper = name.upper()
-        if upper in ALLOWED_SECRETS:
-            # Present by design in the broker's own environment. If one of
-            # these shows up in an *agent's* environment, the broker is running
-            # in the wrong process, which this check cannot see from here.
-            continue
-        if upper.endswith(("_API_KEY", "_TOKEN")):
-            leaked.append(name)
+    leaked = [
+        name
+        for name in environ
+        if name.upper().endswith(("_API_KEY", "_TOKEN")) or name.upper() in ALLOWED_SECRETS
+    ]
     return sorted(set(leaked))

@@ -141,7 +141,8 @@ in tmux — it does not matter, because nothing is lost by killing it.
 ```bash
 army status                      # what is in flight, what is waiting on you
 army approve a3f9c2 --choice merge
-army deny a3f9c2
+army deny a3f9c2                 # stops this branch; nothing restarts it but you
+army resume a3f9c2               # ...and this is how you do that
 army effects                     # external actions whose outcome a crash left unknown
 ```
 
@@ -186,9 +187,11 @@ tick: started=0 advanced=1 unchanged=0 failed=0
 ```
 
 Either route becomes the same durable command, consumed exactly once. The
-reply is matched narrowly: it must name exactly one option, so `ship` answers
-and `ship or iterate, I can't decide` does not — a gate that guesses at an
-ambiguous answer is worse than one that waits.
+reply is matched narrowly, on whole words: it must name exactly one option, so
+`ship` answers, `ship or iterate, I can't decide` does not, and `ownership`
+does not either. A negation in front of the option inverts it, so `do not ship`
+declines rather than approving — substring matching there is exactly how a gate
+fails open.
 
 Replies are read from consumed items *and* from queued pending inputs, because
 a run parked overnight often has no live runner behind it and an answer given

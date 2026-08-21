@@ -33,6 +33,8 @@ class FakeOmni:
         self.asked: list[tuple[str, str, list[str]]] = []
         self.fail_ask: OmniError | None = None
         self.fail_dispatch: OmniError | None = None
+        self.replies: list[str] = []
+        self.harness: str | None = None
 
     def create_session(self, agent_id: str, **kwargs: Any) -> str:
         session_id = f"conv_{len(self.sessions):032d}"
@@ -42,8 +44,19 @@ class FakeOmni:
     def send(self, session_id: str, text: str) -> None:
         pass
 
+    def get_session(self, session_id: str) -> Any:
+        from army.omni import Session
+
+        return Session(
+            id=session_id,
+            title=None,
+            status="idle",
+            harness=self.harness,
+            pending_elicitations=[],
+        )
+
     def replies_after(self, session_id: str, marker: str) -> list[str]:
-        return []
+        return list(self.replies)
 
     def ask(
         self,
@@ -459,3 +472,132 @@ def test_a_declining_reply_pauses(store: Store) -> None:
     after = store.get_run(run.id)
     assert after is not None
     assert after.state is RunState.PAUSED
+
+
+# ── answering from chat must not fail open ─────────────────
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected_state", "expected_reason"),
+    [
+        ("ship", RunState.CONTINUE, "owner chose ship"),
+        ("please iterate", RunState.CONTINUE, "owner chose iterate"),
+        ("do not ship this", RunState.PAUSED, "owner declined"),
+        ("don't ship", RunState.PAUSED, "owner declined"),
+        ("ship or iterate, I can't decide", RunState.WAITING_HUMAN, None),
+        # "ship" inside "ownership" is the substring bug this guards.
+        ("ownership of the plan is unclear", RunState.WAITING_HUMAN, None),
+        ("looks fine to me", RunState.WAITING_HUMAN, None),
+    ],
+)
+def test_chat_replies_are_matched_on_whole_words(
+    store: Store,
+    reply: str,
+    expected_state: RunState,
+    expected_reason: str | None,
+) -> None:
+    """Substring matching is what makes a gate fail open.
+
+    "do not ship this" contains "ship", and so does "ownership". A gate that
+    reads either as approval is worse than one that never asks, so matching is
+    whole-word and a negation in front of the option inverts it. Anything
+    ambiguous leaves the run parked.
+    """
+    omni, workload = FakeOmni(), DemoWorkload()
+    run = _drive_to_waiting(store, omni, workload)
+    supervisor = Supervisor(store, omni, workload)
+    omni.replies = [reply]
+
+    supervisor.tick()
+
+    after = store.get_run(run.id)
+    assert after is not None
+    assert after.state is expected_state, f"{reply!r} landed in {after.state.value}"
+    if expected_reason is not None:
+        assert after.terminal_reason == expected_reason
+
+
+# ── a paused branch can be restarted ───────────────────────
+
+
+def test_a_paused_run_can_be_resumed(store: Store) -> None:
+    """ "Paused" has to mean something a human can undo.
+
+    Otherwise it is a nicer word for abandoned: the run is invisible to the
+    supervisor, has no legal move out, and nothing in the CLI can reach it.
+    """
+    omni, workload = FakeOmni(), DemoWorkload()
+    run = _drive_to_waiting(store, omni, workload)
+    supervisor = Supervisor(store, omni, workload)
+    supervisor.answer(run.id, CommandKind.DENY, {})
+    supervisor.tick()
+    assert store.get_run(run.id).state is RunState.PAUSED  # type: ignore[union-attr]
+
+    supervisor.resume(run.id)
+    supervisor.tick()
+
+    after = store.get_run(run.id)
+    assert after is not None
+    assert after.state is RunState.READY
+    assert after.attempt == 0, "a deliberately restarted branch has not failed twice already"
+
+
+def test_a_paused_run_stays_put_until_someone_asks(store: Store) -> None:
+    """It must not spin: a paused run with no command is not the loop's work."""
+    omni, workload = FakeOmni(), DemoWorkload()
+    run = _drive_to_waiting(store, omni, workload)
+    supervisor = Supervisor(store, omni, workload)
+    supervisor.answer(run.id, CommandKind.DENY, {})
+    supervisor.tick()
+    version_when_paused = store.get_run(run.id).version  # type: ignore[union-attr]
+
+    for _ in range(3):
+        supervisor.tick()
+
+    assert store.get_run(run.id).version == version_when_paused  # type: ignore[union-attr]
+
+
+def test_a_stale_verdict_cannot_wake_a_paused_run(store: Store) -> None:
+    """An answer that arrives after the branch stopped is not a resume."""
+    omni, workload = FakeOmni(), DemoWorkload()
+    run = _drive_to_waiting(store, omni, workload)
+    supervisor = Supervisor(store, omni, workload)
+    supervisor.answer(run.id, CommandKind.DENY, {})
+    supervisor.tick()
+
+    supervisor.answer(run.id, CommandKind.APPROVE, {"choice": "merge"})
+    supervisor.tick()
+
+    after = store.get_run(run.id)
+    assert after is not None
+    assert after.state is RunState.PAUSED
+    assert store.next_command(run.id) is None, "the stale verdict must be retired, not left armed"
+
+
+# ── lanes charge the vendor that actually ran ──────────────
+
+
+def test_lanes_charge_the_harness_the_session_landed_on(store: Store) -> None:
+    """Charging by intent, or by whichever lane is emptiest, describes a fleet
+    that is not running: two Claude sessions can end up counted against Grok,
+    so a full Claude lane still admits work.
+    """
+    lanes = Lanes([Lane("claude-sdk", max_concurrent=4), Lane("grok", max_concurrent=4)])
+    omni = FakeOmni()
+    omni.harness = "claude-sdk"
+    supervisor = Supervisor(store, omni, DemoWorkload(), lanes=lanes)
+
+    supervisor.tick()
+    supervisor.tick()
+
+    depth = lanes.depth()
+    assert depth["claude-sdk"]["in_flight"] == 2
+    assert depth["grok"]["in_flight"] == 0
+
+
+def test_an_unconfigured_harness_is_reported_not_silently_uncounted() -> None:
+    """A vendor with no lane has unbounded concurrency — say so."""
+    lanes = Lanes([Lane("claude-sdk", max_concurrent=1)])
+
+    assert lanes.acquire(1, "grok") is False
+    assert lanes.acquire(1, "claude-sdk") is True

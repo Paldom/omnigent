@@ -101,24 +101,36 @@ class Lanes:
             return None
         return max(candidates)[1]
 
-    def acquire(self, count: int = 1, harness: str | None = None) -> None:
+    def acquire(self, count: int = 1, harness: str | None = None) -> bool:
         """
-        Record that sessions have started.
+        Record that sessions have started on a named vendor.
+
+        The harness is required in practice. Spreading an unqualified
+        acquisition across whichever lanes look emptiest is worse than not
+        counting at all: two Claude sessions can end up charged to the Grok and
+        Kimi counters, so a full Claude lane still admits work and the numbers
+        describe a fleet that is not running.
 
         :param count: How many.
-        :param harness: Which lane, or ``None`` to spread across lanes with
-            room (used when the caller let :meth:`pick` choose).
+        :param harness: Which lane. ``None`` spreads across lanes with room,
+            which is only meaningful when the caller genuinely does not know
+            the vendor yet.
+        :returns: ``True`` when the named lane exists and was charged.
+            ``False`` means the harness has no configured lane, so nothing
+            bounds its concurrency — worth surfacing rather than swallowing.
         """
         if harness is not None:
             lane = self._lanes.get(harness)
-            if lane is not None:
-                lane.in_flight += count
-            return
+            if lane is None:
+                return False
+            lane.in_flight += count
+            return True
         for _ in range(count):
             chosen = self.pick()
             if chosen is None:
-                return
+                return False
             self._lanes[chosen].in_flight += 1
+        return True
 
     def release(self, count: int = 1, harness: str | None = None) -> None:
         """
@@ -149,9 +161,17 @@ class Lanes:
         """
         Put one lane to sleep after a vendor reported a limit.
 
-        Only that vendor's lane. A 429 from one subscription says nothing about
+        Only that vendor's lane. A limit on one subscription says nothing about
         the others, and stopping the whole loop for it would waste the capacity
         that is still there.
+
+        **Nothing calls this yet, deliberately.** Omnigent surfaces no
+        normalised vendor rate-limit signal: its own 429 means the control-plane
+        API throttled *us*, which says nothing about any vendor, and a
+        subscription limit shows up inside a turn as a failed session rather
+        than as a typed event. Cooling a vendor lane on the wrong signal would
+        idle capacity that was never limited, so this stays a seam until the
+        signal exists — that is upstream OMNI-11 / #857.
 
         :param harness: The lane that hit the limit.
         :param seconds: How long to sleep, or ``None`` for the default.

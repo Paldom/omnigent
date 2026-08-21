@@ -15,6 +15,7 @@ effects journal in :mod:`army.store` is for.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -183,7 +184,45 @@ class Supervisor:
             return self._ask(run, now=now)
         if run.state is RunState.WAITING_HUMAN:
             return self._apply_command(run, now=now)
+        if run.state is RunState.PAUSED:
+            return self._resume(run, now=now)
         return None
+
+    def _resume(self, run: Run, *, now: int) -> Run | None:
+        """Restart a paused branch, if a human has asked for it.
+
+        Back to ``READY``, not to where it stopped: whatever it was collecting
+        finished or died while it sat paused, so the only honest restart is a
+        fresh iteration. The attempt counter resets with it — a branch a human
+        deliberately restarted has not "failed twice already".
+
+        :param run: The paused run.
+        :param now: Unix epoch seconds.
+        :returns: The run after resuming, or ``None`` if nothing asked it to.
+        """
+        command = self.store.next_command(run.id)
+        if command is None:
+            return None
+        if command.kind is not CommandKind.RESUME:
+            # Anything else aimed at a paused run is stale — most likely a
+            # verdict that arrived after the branch was already stopped.
+            # Consume it so it cannot wake the run later with the wrong answer.
+            self._discard_stale(run, command, now=now)
+            return None
+        _logger.info("run %s resumed by owner", run.id)
+        return self.store.transition(
+            run, RunState.READY, attempt=0, terminal_reason=None, consume=command, now=now
+        )
+
+    def _discard_stale(self, run: Run, command: Command, *, now: int) -> None:
+        """Consume a command that cannot apply where the run now is."""
+        _logger.info(
+            "run %s is %s; discarding a stale %s command",
+            run.id,
+            run.state.value,
+            command.kind.value,
+        )
+        self.store.consume_command(command, now=now)
 
     def _dispatch(self, run: Run, *, now: int) -> Run | None:
         """Move ``READY`` to ``DISPATCHING``, respecting attempt limits and lanes."""
@@ -207,9 +246,41 @@ class Supervisor:
                 _logger.warning("dispatch for run %s hit a transient error: %s", run.id, exc)
                 return None
             return self._fail(run, f"dispatch failed: {exc}", now=now)
-        if self.lanes is not None:
-            self.lanes.acquire(len(sessions))
+        self._charge_lanes(sessions)
         return self.store.transition(run, RunState.COLLECTING, outstanding=sessions, now=now)
+
+    def _charge_lanes(self, session_ids: list[str]) -> None:
+        """Occupy the lane each session actually landed on.
+
+        Asking the server which harness bound is the only honest way to do
+        this: a per-session override can be refused, and the agent spec's own
+        harness wins by default, so what the workload intended and what is
+        running are not reliably the same. Charging by intent — or worse, by
+        whichever lane happens to be emptiest — leaves the counters describing
+        a fleet that does not exist.
+
+        Best-effort. A lane that cannot be charged is a wrong number, not a
+        reason to fail an iteration that has already started.
+
+        :param session_ids: Sessions just dispatched.
+        """
+        if self.lanes is None:
+            return
+        for session_id in session_ids:
+            try:
+                harness = self.omni.get_session(session_id).harness
+            except OmniError as exc:
+                _logger.warning("could not read the harness for %s: %s", session_id, exc)
+                continue
+            if harness is None:
+                continue
+            if not self.lanes.acquire(1, harness):
+                _logger.warning(
+                    "session %s runs on %r, which has no configured lane — "
+                    "its concurrency is unbounded until army.toml names it",
+                    session_id,
+                    harness,
+                )
 
     def _collect(self, run: Run, *, now: int) -> Run | None:
         """Gather finished work; stay in ``COLLECTING`` until it is all in."""
@@ -325,14 +396,24 @@ class Supervisor:
 
         options = [str(o) for o in (run.artifacts.get("options") or [])]
         for reply in replies:
-            lowered = reply.lower()
-            matched = [option for option in options if option.lower() in lowered]
-            if len(matched) == 1:
-                _logger.info("run %s answered in chat: %s", run.id, matched[0])
-                return self.answer(run.id, CommandKind.APPROVE, {"choice": matched[0]}, now=now)
+            matched = _options_named_in(reply, options)
             if len(matched) > 1:
+                # Two options named: "merge or iterate?" is a question, not an
+                # answer. Leave it parked and let them say it again.
                 continue
-            if any(word in lowered.split() for word in ("deny", "reject", "no", "stop")):
+            if len(matched) == 1:
+                option, negated = matched[0]
+                if negated:
+                    _logger.info("run %s declined in chat: not %s", run.id, option)
+                    return self.answer(run.id, CommandKind.DENY, {}, now=now)
+                _logger.info("run %s answered in chat: %s", run.id, option)
+                return self.answer(run.id, CommandKind.APPROVE, {"choice": option}, now=now)
+            # Only fall back to bare refusal words when no option was named, and
+            # never let one double as an option — "stop" is a deny word in
+            # general and a legitimate choice in this workload.
+            offered = {option.lower() for option in options}
+            words = _words(reply)
+            if any(word in words for word in _DENY_WORDS - offered):
                 return self.answer(run.id, CommandKind.DENY, {}, now=now)
         return None
 
@@ -348,6 +429,17 @@ class Supervisor:
             return None
 
     # ── answering ─────────────────────────────────────────────────
+
+    def resume(self, run_id: str, *, now: int | None = None) -> Command:
+        """
+        Ask a paused branch to start again.
+
+        :param run_id: Run to restart.
+        :param now: Unix epoch seconds; defaults to the clock.
+        :returns: The recorded command.
+        """
+        stamp = int(time.time()) if now is None else now
+        return self.store.record_command(Command.new(run_id, CommandKind.RESUME, {}, now=stamp))
 
     def answer(
         self,
@@ -372,6 +464,46 @@ class Supervisor:
         """
         stamp = int(time.time()) if now is None else now
         return self.store.record_command(Command.new(run_id, kind, payload or {}, now=stamp))
+
+
+#: Words that refuse without naming an option. Any that is also an offered
+#: option is dropped at match time — a workload may legitimately offer "stop".
+_DENY_WORDS: frozenset[str] = frozenset({"deny", "reject", "decline", "no", "stop", "abort"})
+
+#: Words that invert the option immediately after them.
+_NEGATIONS: frozenset[str] = frozenset({"not", "dont", "don't", "never", "no", "avoid", "without"})
+
+
+def _words(text: str) -> list[str]:
+    """Split a reply into comparable words, dropping punctuation."""
+    return re.findall(r"[a-z0-9'-]+", text.lower())
+
+
+def _options_named_in(reply: str, options: list[str]) -> list[tuple[str, bool]]:
+    """
+    Find which offered options a reply names, and whether each was negated.
+
+    Whole words only. Substring matching is what makes a gate fail open: "do
+    not merge this" contains "merge", and a gate that reads that as approval is
+    worse than one that never asks.
+
+    :param reply: What the human typed.
+    :param options: The options that were offered.
+    :returns: ``(option, negated)`` for each option named, at most once each.
+    """
+    words = _words(reply)
+    found: list[tuple[str, bool]] = []
+    for option in options:
+        needle = _words(option)
+        if not needle:
+            continue
+        for start in range(len(words) - len(needle) + 1):
+            if words[start : start + len(needle)] != needle:
+                continue
+            negated = start > 0 and words[start - 1] in _NEGATIONS
+            found.append((option, negated))
+            break
+    return found
 
 
 def _asking_session(run: Run) -> str | None:

@@ -101,6 +101,8 @@ def cmd_status(config: Config, args: argparse.Namespace) -> int:
         print(f"{run.id[:12]}  {run.state.value:<14} v{run.version:<3} {age:>10}{marker}")
         if run.terminal_reason:
             print(f"{'':14}{run.terminal_reason}")
+        if run.state is RunState.PAUSED:
+            print(f"{'':14}army resume {run.id[:12]}")
 
     if waiting:
         print()
@@ -138,6 +140,31 @@ def cmd_answer(config: Config, args: argparse.Namespace) -> int:
     payload = {"choice": args.choice} if getattr(args, "choice", None) else {}
     supervisor.answer(run.id, kind, payload)
     print(f"recorded {kind.value} for {run.id[:12]}; the loop applies it on its next tick")
+    return 0
+
+
+def cmd_resume(config: Config, args: argparse.Namespace) -> int:
+    """
+    Restart a branch a decline had paused.
+
+    Declining stops a branch on purpose, so nothing restarts it automatically —
+    but something has to be able to, or "paused" is just a nicer word for
+    abandoned.
+
+    :param config: Resolved configuration.
+    :param args: Parsed arguments; uses ``run``.
+    :returns: Process exit code.
+    """
+    store, supervisor = _build(config)
+    run = _resolve_run(store, args.run)
+    if run is None:
+        print(f"no run matching {args.run!r}", file=sys.stderr)
+        return 1
+    if run.state is not RunState.PAUSED:
+        print(f"run {run.id[:12]} is {run.state.value}, not paused", file=sys.stderr)
+        return 1
+    supervisor.resume(run.id)
+    print(f"recorded resume for {run.id[:12]}; the loop restarts it on its next tick")
     return 0
 
 
@@ -224,6 +251,10 @@ def build_parser() -> argparse.ArgumentParser:
         answer.add_argument("run", help="run id or unambiguous prefix")
         answer.add_argument("--choice", help="which option, for a multi-option question")
         answer.set_defaults(func=cmd_answer)
+
+    resume = sub.add_parser("resume", help="restart a paused run", parents=[common])
+    resume.add_argument("run", help="run id or unambiguous prefix")
+    resume.set_defaults(func=cmd_resume)
 
     effects = sub.add_parser(
         "effects", help="list side effects with an unknown outcome", parents=[common]

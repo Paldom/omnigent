@@ -13,6 +13,7 @@ different vendor is close to free once you already have both logged in.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,10 @@ class DemoWorkload:
     """
 
     name = "demo"
+
+    #: The choices offered at the barrier. ``apply`` refuses anything else
+    #: rather than guessing, so this is the whole accepted set.
+    OPTIONS: tuple[str, ...] = ("merge", "iterate", "discard", "stop")
 
     def __init__(
         self,
@@ -78,15 +83,28 @@ class DemoWorkload:
     # ── the five seams ────────────────────────────────────────────
 
     def acquire(self) -> dict[str, Any] | None:
-        """Take the first unfinished line from the queue file."""
+        """Take the first unfinished line from the queue file.
+
+        Marks the line ``taken:``, not ``done:``. Writing ``done:`` here would
+        claim the work finished before it had started — and a run that then
+        fails (three dispatch attempts, a vanished session, the stall guard)
+        leaves the file asserting success for a task nobody did. ``taken:``
+        says what is true: this was picked up. :meth:`apply` converts it to
+        ``done:`` when the owner accepts, or back to a bare task line when they
+        ask for another pass.
+
+        A line left at ``taken:`` is therefore a task whose iteration did not
+        finish. That is visible in the file, next to a FAILED run in
+        ``army status``, and re-queued by deleting the prefix.
+        """
         if not self.queue_path.exists():
             return None
         lines = self.queue_path.read_text().splitlines()
         for index, line in enumerate(lines):
             task = line.strip()
-            if not task or task.startswith(("#", "done:")):
+            if not task or task.startswith(("#", "done:", "taken:")):
                 continue
-            lines[index] = f"done: {task}"
+            lines[index] = f"taken: {task}"
             self.queue_path.write_text("\n".join(lines) + "\n")
             return {"task": task, "line": index}
         return None
@@ -175,7 +193,7 @@ class DemoWorkload:
         }
         return (
             f"{task}\n\nImplemented and reviewed by a different vendor. Continue?",
-            ["merge", "iterate", "discard", "stop"],
+            list(self.OPTIONS),
             evidence,
         )
 
@@ -189,28 +207,46 @@ class DemoWorkload:
             self._requeue(run)
             return "paused", "declined; task returned to the queue"
 
-        choice = str(payload.get("choice") or "merge")
+        choice = str(payload.get("choice") or "")
+        if choice not in self.OPTIONS:
+            # An unrecognised choice must not fall through to "approved". The
+            # barrier exists to be answered deliberately; a typo is not an
+            # answer, and defaulting one to merge is the worst possible guess.
+            self._requeue(run)
+            return "paused", f"unrecognised choice {choice!r}; task returned to the queue"
         if choice == "stop":
+            self._mark_done(run)
             return "completed", "owner stopped the loop"
         if choice == "discard":
+            self._mark_done(run)
             return "continue", "change discarded; moving on"
         if choice == "iterate":
             self._requeue(run)
             return "continue", "task returned to the queue for another pass"
+        self._mark_done(run)
         return "continue", "approved"
+
+    def _mark_done(self, run: Run) -> None:
+        """Convert this run's ``taken:`` line to ``done:`` once it is settled."""
+        self._rewrite_line(run, lambda task: f"done: {task}")
 
     # ── queue bookkeeping ─────────────────────────────────────────
 
     def _requeue(self, run: Run) -> None:
         """Put a task back so the next iteration picks it up again."""
+        self._rewrite_line(run, lambda task: task)
+
+    def _rewrite_line(self, run: Run, render: Callable[[str], str]) -> None:
+        """Rewrite this run's queue line, if it is still where it was."""
         task = run.payload.get("task")
-        if not task or not self.queue_path.exists():
+        index = run.payload.get("line")
+        if not task or not isinstance(index, int) or not self.queue_path.exists():
             return
         lines = self.queue_path.read_text().splitlines()
-        index = run.payload.get("line")
-        if isinstance(index, int) and 0 <= index < len(lines):
-            lines[index] = str(task)
-            self.queue_path.write_text("\n".join(lines) + "\n")
+        if not 0 <= index < len(lines):
+            return
+        lines[index] = render(str(task))
+        self.queue_path.write_text("\n".join(lines) + "\n")
 
 
 def _title(task: str) -> str:

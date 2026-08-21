@@ -46,12 +46,16 @@ class Session:
     :param id: Session id.
     :param title: Human-facing name, e.g. ``"auth-refactor"``.
     :param status: Live turn status, e.g. ``"idle"`` / ``"running"``.
+    :param harness: The harness the server actually bound, e.g.
+        ``"claude-native"``. Authoritative in a way a caller's intent is not —
+        an override can be refused, and a spec's own harness wins by default.
     :param pending_elicitations: Outstanding approval prompts on the session.
     """
 
     id: str
     title: str | None
     status: str | None
+    harness: str | None
     pending_elicitations: list[dict[str, Any]]
 
 
@@ -327,6 +331,7 @@ class OmniClient:
             id=data.get("id", session_id),
             title=data.get("title"),
             status=data.get("status"),
+            harness=data.get("harness"),
             pending_elicitations=data.get("pending_elicitations") or [],
         )
 
