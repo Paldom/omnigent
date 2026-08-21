@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from army.lanes import Lanes
-from army.omni import OmniClient, OmniError
+from army.omni import OmniClient, OmniError, barrier_marker
 from army.state import Command, CommandKind, Run, RunState
 from army.store import ConcurrentTransition, Store
 from army.workload import Workload
@@ -263,6 +263,8 @@ class Supervisor:
         """
         command = self.store.next_command(run.id)
         if command is None:
+            command = self._command_from_chat_reply(run, now=now)
+        if command is None:
             return None
         if command.kind is CommandKind.CANCEL:
             return self.store.transition(
@@ -281,6 +283,58 @@ class Supervisor:
         if target is None:
             return self._fail(run, f"workload returned an unknown decision {decision!r}", now=now)
         return self.store.transition(run, target, terminal_reason=reason, consume=command, now=now)
+
+    def _command_from_chat_reply(self, run: Run, *, now: int) -> Command | None:
+        """
+        Turn a reply typed into the session into a durable command.
+
+        The question was posted into the session, and the Omnigent web UI is
+        already reachable from a phone — so a reply typed there is the mobile
+        answer path, with no second service to run or authenticate. Recording
+        it as a command rather than acting on it directly keeps one answer
+        mechanism: whether it arrived from a terminal or a phone, it is the
+        same row, consumed exactly once.
+
+        Matching is deliberately narrow. The reply must contain one of the
+        offered options and no other, so "merge" answers and "merge or iterate,
+        I can't decide" does not — an ambiguous answer to a gate is not an
+        answer. Anything unrecognised is left alone, so the run stays parked
+        and a person can say it again more clearly.
+
+        :param run: The run parked on a human.
+        :param now: Unix epoch seconds.
+        :returns: The recorded command, or ``None`` when nothing decisive was
+            said.
+        """
+        session_id = _asking_session(run)
+        if session_id is None:
+            return None
+        try:
+            replies = self.omni.replies_after(session_id, barrier_marker(run.id))
+        except OmniError as exc:
+            # Expected: the server is briefly unreachable. Next tick retries.
+            _logger.warning("could not read replies for run %s: %s", run.id, exc)
+            return None
+        except Exception:
+            # Anything else is a bug here, and this path is only a convenience
+            # on top of `army approve` — it must not cost a run. Without this,
+            # a fault reaches tick()'s catch-all and fails an iteration that
+            # was merely waiting to be answered.
+            _logger.exception("reading replies for run %s failed", run.id)
+            return None
+
+        options = [str(o) for o in (run.artifacts.get("options") or [])]
+        for reply in replies:
+            lowered = reply.lower()
+            matched = [option for option in options if option.lower() in lowered]
+            if len(matched) == 1:
+                _logger.info("run %s answered in chat: %s", run.id, matched[0])
+                return self.answer(run.id, CommandKind.APPROVE, {"choice": matched[0]}, now=now)
+            if len(matched) > 1:
+                continue
+            if any(word in lowered.split() for word in ("deny", "reject", "no", "stop")):
+                return self.answer(run.id, CommandKind.DENY, {}, now=now)
+        return None
 
     def _fail(self, run: Run, reason: str, *, now: int) -> Run | None:
         """Move a run to ``FAILED``, tolerating a race with another mover."""

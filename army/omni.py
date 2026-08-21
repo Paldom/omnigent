@@ -55,6 +55,30 @@ class Session:
     pending_elicitations: list[dict[str, Any]]
 
 
+def barrier_marker(run_id: str) -> str:
+    """
+    The line that identifies one run's question in a session transcript.
+
+    Carries the run id, so two iterations asking in the same session cannot be
+    confused for each other, and doubles as the terminal instruction.
+
+    :param run_id: The run being asked about.
+    :returns: A line unique to this run's question.
+    """
+    return f"Answer with: army approve {run_id[:12]} --choice <option>"
+
+
+def _text_of(content: Any) -> str:
+    """Flatten a message ``content`` list into plain text."""
+    if not isinstance(content, list):
+        return ""
+    return " ".join(
+        str(part.get("text", ""))
+        for part in content
+        if isinstance(part, dict) and part.get("text")
+    ).strip()
+
+
 class OmniClient:
     """Talks to one Omnigent server.
 
@@ -243,6 +267,54 @@ class OmniClient:
                 return str(session["id"])
         return None
 
+    def replies_after(self, session_id: str, marker: str) -> list[str]:
+        """
+        Return what the user said in a session after a marker line, oldest first.
+
+        This is the mobile answer path, and it needs no second service: the
+        question is posted into the session, the Omnigent web UI is already
+        reachable from a phone, and a reply typed there comes back here.
+
+        Two sources, in order, because a reply has to be readable whether or
+        not the session is currently alive:
+
+        - **consumed items** — what the runner has already taken in;
+        - **pending inputs** — what is queued and not yet consumed. A session
+          whose runner has died queues indefinitely, and an answer given to a
+          dead worker still has to count. This is the case that matters, since
+          a run parked overnight often has no live runner behind it.
+
+        Only what the *user* said. An assistant that mentions an option while
+        explaining itself must not be able to answer the question about itself.
+
+        :param session_id: Session to read.
+        :param marker: A line unique to the question. Everything before its
+            last occurrence is ignored, so earlier chatter cannot answer
+            retroactively.
+        :returns: Reply texts, oldest first. Empty when the marker was never
+            posted or nothing followed it.
+        """
+        snapshot = self._request("GET", f"/v1/sessions/{session_id}")
+        said: list[str] = []
+        for item in snapshot.get("items") or []:
+            if item.get("type") != "message":
+                continue
+            data = item.get("data") or {}
+            if data.get("role") != "user":
+                continue
+            said.append(_text_of(data.get("content")))
+        for pending in snapshot.get("pending_inputs") or []:
+            said.append(_text_of(pending.get("content")))
+
+        said = [text for text in said if text]
+        last_question = max(
+            (index for index, text in enumerate(said) if marker in text),
+            default=None,
+        )
+        if last_question is None:
+            return []
+        return said[last_question + 1 :]
+
     def get_session(self, session_id: str) -> Session:
         """
         Read a session's current state.
@@ -329,6 +401,8 @@ class OmniClient:
             lines += [f"  {key}: {value}" for key, value in sorted(evidence.items())]
             lines.append("")
         lines.append(f"Options: {', '.join(options)}")
-        lines.append(f"Answer with: army approve {run_id[:12]} --choice <option>")
+        # The marker is what `replies_after` splits on, so earlier chatter
+        # cannot answer retroactively. It doubles as the instruction.
+        lines.append(f"{barrier_marker(run_id)} — or just reply with one option.")
         self.send(session_id, "\n".join(lines))
         return f"barrier_{run_id}"

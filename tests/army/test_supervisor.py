@@ -42,6 +42,9 @@ class FakeOmni:
     def send(self, session_id: str, text: str) -> None:
         pass
 
+    def replies_after(self, session_id: str, marker: str) -> list[str]:
+        return []
+
     def ask(
         self,
         run_id: str,
@@ -357,3 +360,102 @@ def test_waiting_on_a_human_is_never_stuck(store: Store) -> None:
     after = store.get_run(run.id)
     assert after is not None
     assert after.state is RunState.WAITING_HUMAN
+
+
+class ChattyOmni(FakeOmni):
+    """A FakeOmni that can hand back replies typed into the session."""
+
+    def __init__(self, replies: list[str] | None = None) -> None:
+        super().__init__()
+        self.replies = list(replies or [])
+
+    def replies_after(self, session_id: str, marker: str) -> list[str]:
+        return self.replies
+
+
+def test_a_chat_reply_answers_the_question(store: Store) -> None:
+    """The mobile path: the Omnigent UI is already on your phone.
+
+    Posting the question into the session and reading the reply back is the
+    whole of it — no second service, no bot, no webhook to authenticate.
+    """
+    omni = ChattyOmni()
+    workload = DemoWorkload()
+    run = _drive_to_waiting(store, omni, workload)
+    omni.replies = ["ship it"]
+
+    Supervisor(store, omni, workload).tick()
+
+    after = store.get_run(run.id)
+    assert after is not None
+    assert after.state is RunState.CONTINUE
+    assert after.terminal_reason == "owner chose ship"
+
+
+def test_an_ambiguous_reply_does_not_answer(store: Store) -> None:
+    """ "merge or iterate, I can't decide" is not a decision.
+
+    A gate that guesses at an ambiguous answer is worse than one that waits.
+    """
+    omni = ChattyOmni()
+    workload = DemoWorkload()
+    run = _drive_to_waiting(store, omni, workload)
+    omni.replies = ["ship or iterate, I can't decide"]
+
+    Supervisor(store, omni, workload).tick()
+
+    after = store.get_run(run.id)
+    assert after is not None
+    assert after.state is RunState.WAITING_HUMAN
+
+
+def test_chatter_before_the_question_is_ignored(store: Store) -> None:
+    """Only replies newer than the question count.
+
+    The word "ship" said earlier in the conversation, before anyone was asked
+    anything, must not retroactively answer.
+    """
+    omni = ChattyOmni()
+    workload = DemoWorkload()
+    run = _drive_to_waiting(store, omni, workload)
+    # user_messages_since is asked for messages after run.updated_at; a client
+    # honouring that returns nothing here.
+    omni.replies = []
+
+    Supervisor(store, omni, workload).tick()
+
+    after = store.get_run(run.id)
+    assert after is not None
+    assert after.state is RunState.WAITING_HUMAN
+
+
+def test_a_chat_reply_is_consumed_once(store: Store) -> None:
+    """The reply stays in the transcript, so it must not answer twice."""
+    omni = ChattyOmni()
+    workload = DemoWorkload()
+    run = _drive_to_waiting(store, omni, workload)
+    omni.replies = ["ship"]
+    supervisor = Supervisor(store, omni, workload)
+
+    supervisor.tick()
+    first = store.get_run(run.id)
+    assert first is not None
+    supervisor.tick()
+
+    after = store.get_run(run.id)
+    assert after is not None
+    assert after.version == first.version
+
+
+def test_a_declining_reply_pauses(store: Store) -> None:
+    """ "no" has to mean no, not "unrecognised"."""
+    omni = ChattyOmni()
+    workload = DemoWorkload()
+    run = _drive_to_waiting(store, omni, workload)
+    omni.replies = ["no"]
+
+    Supervisor(store, omni, workload).tick()
+
+    after = store.get_run(run.id)
+    assert after is not None
+    assert after.state is RunState.PAUSED

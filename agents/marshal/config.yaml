@@ -15,6 +15,17 @@ description: >-
 # See docs/agent-army/README.md — the `army` control plane owns the loop's
 # durable state; this agent is what it dispatches to.
 
+# Marshal is the ONLY agent in this roster with spawn: true, and that is the
+# depth bound. It is deliberate: nothing upstream limits how deep a sub-agent
+# tree goes (omnigent-ai/omnigent#5169). `spawn_bounds` caps dispatches per
+# *turn*, and each child gets a fresh counter, so a self-similar chain stays
+# inside the cap at every level while the tree grows as the branching factor to
+# the power of the depth.
+#
+# Withholding spawn from the workers makes the tree two levels by construction.
+# Before granting it to one, decide what stops its children — on an unattended
+# loop the symptom is not a crash, it is every level queueing behind the same
+# per-vendor login.
 spawn: true
 
 executor:
