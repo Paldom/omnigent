@@ -13,6 +13,7 @@ different vendor is close to free once you already have both logged in.
 from __future__ import annotations
 
 import logging
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,11 @@ class DemoWorkload:
         agent's own. Worth setting to a headless harness on a box with no
         working terminal — a native TUI harness needs tmux, and fails the turn
         without it.
+    :param worktrees: Directory to create per-run git worktrees under. Set it
+        and the implementer works in its own checkout on its own branch, so two
+        iterations cannot edit the same files. Unset, everything shares
+        ``workspace`` — which is fine for one run at a time and wrong the
+        moment there are two.
     """
 
     name = "demo"
@@ -57,6 +63,7 @@ class DemoWorkload:
         workspace: str | None = None,
         host_id: str | None = None,
         harness: str | None = None,
+        worktrees: str | None = None,
     ) -> None:
         self.queue_path = Path(queue_path).expanduser()
         self.implementer_agent = implementer_agent
@@ -64,9 +71,57 @@ class DemoWorkload:
         self.workspace = workspace
         self.host_id = host_id
         self.harness = harness
+        self.worktrees = Path(worktrees).expanduser() if worktrees else None
         # Resolved once per process, on first use. The names in army.toml are
         # what a person writes; the API wants the ids it minted.
         self._agent_ids: dict[str, str] = {}
+
+    def _worktree_for(self, run: Run) -> str | None:
+        """
+        Give this run its own checkout, if worktrees are configured.
+
+        Two agents editing one checkout produce a mess neither can explain, and
+        it is the kind of mess that only shows up when two iterations overlap —
+        which is exactly when nobody is watching. The branch is named for the
+        run, so an abandoned one is identifiable later.
+
+        Existing worktrees are reused, so a re-dispatch after a crash goes back
+        to the same checkout rather than starting a third one.
+
+        They are deliberately not cleaned up: the branch and its uncommitted
+        state are the iteration's output, and deleting that on a failure path
+        would throw away the evidence of what went wrong. ``git worktree
+        prune`` when you have read them.
+
+        :param run: The run being dispatched.
+        :returns: A path to use as the session workspace, or ``None`` to use
+            the shared one.
+        """
+        if self.worktrees is None or not self.workspace:
+            return None
+        target = self.worktrees / run.id[:12]
+        if target.exists():
+            return str(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            ["git", "worktree", "add", "-b", f"army/{run.id[:12]}", str(target)],
+            cwd=self.workspace,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            # Not fatal: a repo that cannot make a worktree can still be worked
+            # in directly. Say so, because the isolation the roster promises is
+            # now absent.
+            _logger.warning(
+                "could not create a worktree for run %s (%s); falling back to %s",
+                run.id[:12],
+                result.stderr.strip()[:160],
+                self.workspace,
+            )
+            return None
+        return str(target)
 
     def _host(self, omni: OmniClient) -> str | None:
         """Resolve the host to pin sessions to, asking the server if unset."""
@@ -127,7 +182,7 @@ class DemoWorkload:
         session_id = omni.create_session(
             self._agent_id(self.implementer_agent, omni),
             title=title,
-            workspace=self.workspace,
+            workspace=self._worktree_for(run) or self.workspace,
             host_id=self._host(omni),
             harness=self.harness,
         )

@@ -58,8 +58,11 @@ prompt: |
      review somewhere else — this costs almost nothing once both are logged in,
      and it is the single highest-value thing you do.
 
-  2. **Every implementer works in its own git worktree.** Two agents editing
-     one checkout produce a mess neither of them can explain. Worktrees also
+  2. **Every implementer works in its own git worktree, and it is on you to
+     make one.** Nothing creates it for you when you delegate by hand: pass a
+     fresh worktree path as the sub-agent's workspace. Two agents editing one
+     checkout produce a mess neither of them can explain — and it only shows up
+     when two of them overlap, which is when nobody is watching. Worktrees also
      let you run three attempts at one task and diff them side by side.
 
   3. **Supervise through the inbox. Never busy-poll.** Use `sys_read_inbox` to

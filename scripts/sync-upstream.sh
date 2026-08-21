@@ -10,7 +10,7 @@
 #
 # What it does, in order:
 #   1. fetches upstream
-#   2. fast-forwards main
+#   2. reports what changed
 #   3. reports which carried patches upstream has now merged
 #   4. merges upstream/main into the working branch
 #   5. reruns the checks that the carried patches depend on
@@ -41,15 +41,14 @@ git fetch origin --quiet
 behind="$(git rev-list --count HEAD..upstream/main)"
 echo "==> $branch is $behind commit(s) behind upstream/main"
 
-if [[ "$behind" == "0" ]]; then
-  echo "    already current — nothing to do"
-  exit 0
+if [[ "$behind" != "0" ]]; then
+  echo
+  echo "==> what changed upstream"
+  # `| head` would SIGPIPE the log under `set -o pipefail` once there are more
+  # than 40 commits, which is a normal week here.
+  git log --oneline --no-merges -40 HEAD..upstream/main
+  [[ "$behind" -gt 40 ]] && echo "    ... and $((behind - 40)) more"
 fi
-
-echo
-echo "==> what changed upstream"
-git log --oneline --no-merges HEAD..upstream/main | head -40
-[[ "$behind" -gt 40 ]] && echo "    ... and $((behind - 40)) more"
 
 # A carried patch is worth dropping the moment its PR lands upstream. Checking
 # by PR number rather than by content, because a maintainer may have reworked
@@ -75,6 +74,12 @@ fi
 if [[ "$CHECK_ONLY" == "1" ]]; then
   echo
   echo "==> --check: stopping before the merge"
+  exit 0
+fi
+
+if [[ "$behind" == "0" ]]; then
+  echo
+  echo "==> already current — nothing to merge"
   exit 0
 fi
 

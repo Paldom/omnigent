@@ -7,7 +7,9 @@ coordinated by a loop that keeps going after you close the laptop.
 
 *Recorded against this repository — real sessions, a real Claude turn reading
 `army/state.py`, and an approval card still answerable after the server was
-SIGKILLed and restarted. The scenario is
+SIGKILLed and restarted. One caption overstates: worktree isolation is real for
+the `army` path when `worktrees` is set in `army.toml`, and doctrine rather than
+enforcement when marshal delegates by hand. The scenario is
 [`media/agent-army.scenario.yaml`](media/agent-army.scenario.yaml); full-quality
 MP4 is [`media/agent-army.mp4`](media/agent-army.mp4).*
 

@@ -601,3 +601,66 @@ def test_an_unconfigured_harness_is_reported_not_silently_uncounted() -> None:
 
     assert lanes.acquire(1, "grok") is False
     assert lanes.acquire(1, "claude-sdk") is True
+
+
+# ── worktree isolation ─────────────────────────────────────
+
+
+def test_each_run_gets_its_own_worktree(tmp_path: Path) -> None:
+    """The roster states worktree isolation as a rule, so it has to be real.
+
+    Two agents editing one checkout produce a mess neither can explain, and it
+    only shows up when two iterations overlap — exactly when nobody is looking.
+    """
+    import subprocess
+
+    from army.workloads.demo import DemoWorkload as RealDemoWorkload
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for command in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@e.st"],
+        ["git", "config", "user.name", "t"],
+        ["git", "commit", "-q", "--allow-empty", "-m", "root"],
+    ):
+        subprocess.run(command, cwd=repo, check=True, capture_output=True)
+
+    queue = tmp_path / "queue.txt"
+    queue.write_text("do the thing\n")
+    workload = RealDemoWorkload(
+        queue_path=str(queue),
+        workspace=str(repo),
+        worktrees=str(tmp_path / "worktrees"),
+    )
+    run = Run.new("demo", {"task": "do the thing", "line": 0}, now=1)
+
+    first = workload._worktree_for(run)
+    second = workload._worktree_for(run)
+
+    assert first is not None
+    assert Path(first).is_dir()
+    assert second == first, "a re-dispatch must return to the same checkout"
+    branches = subprocess.run(
+        ["git", "branch", "--list", f"army/{run.id[:12]}"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert f"army/{run.id[:12]}" in branches
+
+
+def test_a_repo_that_cannot_make_a_worktree_still_runs(tmp_path: Path) -> None:
+    """Isolation failing must not stop the work — but it must be visible."""
+    from army.workloads.demo import DemoWorkload as RealDemoWorkload
+
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    workload = RealDemoWorkload(
+        queue_path=str(tmp_path / "q.txt"),
+        workspace=str(not_a_repo),
+        worktrees=str(tmp_path / "worktrees"),
+    )
+
+    assert workload._worktree_for(Run.new("demo", {}, now=1)) is None

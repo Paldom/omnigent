@@ -41,6 +41,12 @@ reviewer_agent = "codex-native-ui"
 # under [lanes] it would be read as a lane and fail at startup.
 # harness = "claude-sdk"
 
+# Give each iteration its own checkout on its own branch, so two runs cannot
+# edit the same files. Unset, everything shares `workspace` — fine for one run
+# at a time, wrong the moment there are two. Worktrees are not cleaned up: the
+# branch is the iteration's output. `git worktree prune` when you have read them.
+worktrees = "~/.omnigent/army/worktrees"
+
 [lanes]
 # Concurrent sessions per vendor. Every sub-agent on one harness shares that
 # harness's single login, so this is the real concurrency bound — not a global
