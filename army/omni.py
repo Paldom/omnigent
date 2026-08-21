@@ -381,11 +381,12 @@ class OmniClient:
         *answers* to something a policy or an MCP server already asked. An
         external orchestrator has nothing to hook.
 
-        And even if there were, it would be the wrong place. A policy ASK
-        raised mid-turn is collapsed to DENY at every phase except INPUT
-        (upstream #765), and a turn parked on one trips the harness idle
-        watchdog (#4854). A barrier that has to survive until the next morning
-        cannot live inside a turn.
+        And even if there were, it would be the wrong place: a turn parked on
+        an approval trips the harness idle watchdog (#4854), and a barrier that
+        has to survive until the next morning cannot live inside a turn. (A
+        policy ASK at TOOL_CALL does raise a real elicitation — it is
+        TOOL_RESULT, OUTPUT and agent-start that collapse to DENY — but an
+        approval that holds overnight is not what that mechanism is for.)
 
         So what this does is post the question into the session as a message —
         so it is *visible* where the work happened, and answerable from the
