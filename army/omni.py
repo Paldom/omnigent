@@ -438,6 +438,7 @@ class OmniClient:
         session_id: str,
         message: str,
         options: list[str],
+        multi_select: bool = False,
         *,
         evidence: dict[str, Any] | None = None,
     ) -> str:
@@ -476,6 +477,9 @@ class OmniClient:
         :param session_id: Session to post the question into.
         :param message: The question.
         :param options: The choices to offer.
+        :param multi_select: Whether the gate accepts more than one of them.
+            Changes only the instruction line; the matcher reads the gate
+            shape off the run.
         :param evidence: Anything the human should see before deciding.
         :returns: The barrier id to park the run on.
         """
@@ -487,6 +491,7 @@ class OmniClient:
         lines.append(f"Options: {', '.join(options)}")
         # The marker is what `replies_after` splits on, so earlier chatter
         # cannot answer retroactively. An identifier, not an instruction.
-        lines.append(f"{barrier_marker(run_id)} — reply with one option to answer.")
+        how = "one or more options" if multi_select else "one option"
+        lines.append(f"{barrier_marker(run_id)} — reply with {how} to answer.")
         self.send(session_id, "\n".join(lines))
         return f"barrier_{run_id}"

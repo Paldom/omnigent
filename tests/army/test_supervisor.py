@@ -31,6 +31,7 @@ class FakeOmni:
     def __init__(self) -> None:
         self.sessions: list[str] = []
         self.asked: list[tuple[str, str, list[str]]] = []
+        self.asked_multi: list[bool] = []
         self.fail_ask: OmniError | None = None
         self.fail_dispatch: OmniError | None = None
         self.replies: list[str] = []
@@ -77,12 +78,14 @@ class FakeOmni:
         session_id: str,
         message: str,
         options: list[str],
+        multi_select: bool = False,
         *,
         evidence: dict[str, Any] | None = None,
     ) -> str:
         if self.fail_ask is not None:
             raise self.fail_ask
         self.asked.append((session_id, message, options))
+        self.asked_multi.append(multi_select)
         return f"elicit_{len(self.asked)}"
 
 

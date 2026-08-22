@@ -26,6 +26,20 @@ class Workload(Protocol):
     again after a restart with the same run, so all five must be safe to
     repeat. Where that is not naturally true — anything with an outside effect
     — go through the effects journal rather than doing it here.
+
+    Two attributes are read with ``getattr`` and so are not declared here —
+    declaring them on a ``runtime_checkable`` Protocol would make them
+    mandatory for every outside implementer:
+
+    * ``harness: str`` — the vendor this workload dispatches to, when it
+      commits to one.
+    * ``multi_select: bool`` — ``True`` when a gate's options are things the
+      owner may pick several of at once. Unset keeps the single-choice
+      contract, where a reply naming two options stays unanswered rather than
+      being read as both. It applies to every question the workload asks, so
+      do not set it on a workload that also asks a pick-one question, and
+      leave it off for anything irreversible: "merge or iterate, I can't
+      decide" must not become "do both" on a gate that arms money.
     """
 
     name: str
