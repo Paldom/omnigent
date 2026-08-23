@@ -25,6 +25,7 @@ from typing import Any
 
 from army.bots.approvals import ITERATION_GATE, ApprovalRequest, ApprovalStore
 from army.bots.budget import BudgetExhausted, BudgetStore
+from army.bots.isolation import sandbox_for
 from army.bots.messages import MessageKind, MessageStore
 from army.bots.model import Bot, BotStatus, IllegalBotMove, RunOutcome, WakeKind
 from army.bots.precondition import PreconditionRegistry, UnknownPrecondition
@@ -349,6 +350,20 @@ class BotSupervisor(Supervisor):
             bot_id=bot.id,
             revision_id=bot.current_revision_id,
         )
+        # What this iteration is *permitted* to touch, recorded on the run
+        # itself. `profile_for` existed and nothing called it, which made the
+        # isolation story a design rather than a control — and an uncalled
+        # security helper reads exactly like an enforced one to anybody
+        # skimming.
+        #
+        # Recording is not enforcing, and the gap is named in the artifact
+        # rather than left to be discovered: Omnigent's own file tools respect
+        # an environment root, the vendor CLIs' native tools do not, so on a
+        # native harness this profile is the intent and not the boundary. It
+        # is still worth writing down — an incident review wants to know what
+        # the run was allowed to do, and "nobody recorded it" is the worst
+        # possible answer.
+        run.artifacts["sandbox"] = sandbox_for(bot)
         try:
             with self.bots.atomic() as conn:
                 self.store.create_run(run, conn=conn)

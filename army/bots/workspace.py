@@ -64,6 +64,16 @@ _SEED = {
 }
 
 
+class WorkspaceRefused(RuntimeError):
+    """
+    A workspace could not be prepared as asked.
+
+    Raised rather than degraded. The isolation a caller asked for is either
+    delivered or refused; quietly delivering less is how a bot ends up
+    committing into someone's working tree.
+    """
+
+
 class DocKind(str, Enum):
     """What a document is for."""
 
@@ -174,14 +184,22 @@ class Workspace:
         """
         Give the bot its own checkout on its own branch.
 
-        Best-effort. A repository that cannot make a worktree can still be
-        worked in directly, and failing the bot over it would be worse than
-        saying so — but it is said, because the isolation the roster promises
-        is now absent.
+        **Fails closed.** This used to warn and carry on, which meant a bot
+        asked for an isolated checkout and silently got the operator's working
+        tree instead — the one outcome worse than refusing, because the log
+        line saying so scrolls past and the bot then commits into whatever it
+        was pointed at. The caller asked for a worktree; if there is no
+        worktree there is no bot.
+
+        The usual reasons this fails are worth reading rather than swallowing:
+        the branch already exists (a previous run of this bot), the target is
+        occupied, or the source repository is mid-operation — a stale
+        ``.git/index.lock`` from an editor that died will do it.
 
         :param bot: The bot.
         :param source_repo: The repository to branch from.
         :param target: Where the worktree goes.
+        :raises WorkspaceRefused: If the worktree could not be created.
         """
         target.parent.mkdir(parents=True, exist_ok=True)
         result = subprocess.run(
@@ -192,11 +210,11 @@ class Workspace:
             check=False,
         )
         if result.returncode != 0:
-            _logger.warning(
-                "could not create a worktree for %s (%s); it will work in a plain directory "
-                "and share whatever checkout it is pointed at",
-                bot.slug,
-                result.stderr.strip()[:160],
+            raise WorkspaceRefused(
+                f"could not give {bot.slug} its own checkout of {source_repo}: "
+                f"{result.stderr.strip()[:200]}. Refusing rather than sharing the "
+                f"working tree — fix the repository, or create the bot without a "
+                f"source repository if it does not need one."
             )
 
     def index(

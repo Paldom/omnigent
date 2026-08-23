@@ -483,3 +483,46 @@ def test_a_verdict_from_the_cli_and_one_from_the_page_are_the_same_verdict(
     command = fleet.store.next_command(run.id)
     assert command is not None and command.kind is CommandKind.APPROVE
     assert bot.id
+
+
+def test_the_precondition_config_never_reaches_the_workload() -> None:
+    """
+    The wake check and the workload share one `workload_config` dict.
+
+    `precondition` configures the supervisor's model-free check; the rest are
+    the workload's constructor arguments. Splatting the whole dict raised
+    `unexpected keyword argument 'precondition'` for the exact shape
+    `docs/agent-army/bots.md` prescribes — so a bot that followed the
+    documentation failed on every tick and retried forever.
+
+    Pinned at `resolve`, which is the choke point: an earlier fix put it in
+    `for_bot` only, and the supervisor resolves a run's *pinned* workload path
+    directly, so the real loop still crashed.
+    """
+    from army.bots.registry import WorkloadRegistry
+
+    registry = WorkloadRegistry()
+    workload = registry.resolve(
+        "army.bots.workloads.heartbeat:HeartbeatWorkload",
+        {"outcome": "no_work", "precondition": {"path": "/tmp/queue.md"}},
+    )
+    assert workload.name == "heartbeat"
+
+
+def test_two_bots_differing_only_in_precondition_share_a_workload() -> None:
+    """
+    A corollary worth pinning: the cache key is built after the strip, so the
+    key cannot be split by a value the workload never sees.
+    """
+    from army.bots.registry import WorkloadRegistry
+
+    registry = WorkloadRegistry()
+    first = registry.resolve(
+        "army.bots.workloads.heartbeat:HeartbeatWorkload",
+        {"outcome": "no_work", "precondition": {"path": "/tmp/a.md"}},
+    )
+    second = registry.resolve(
+        "army.bots.workloads.heartbeat:HeartbeatWorkload",
+        {"outcome": "no_work", "precondition": {"path": "/tmp/b.md"}},
+    )
+    assert first is second

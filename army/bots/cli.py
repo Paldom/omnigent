@@ -106,7 +106,7 @@ def cmd_pending(config: Config, args: argparse.Namespace) -> int:
         left = ""
         if request.expires_at is not None:
             left = f"expires in {_short(request.expires_at - now)}"
-        print(f"{request.id[:12]}  {bot.slug if bot else request.bot_id:<16}{left:>18}{owner}")
+        print(f"{request.id[:12]}  {bot.slug if bot else request.bot_id:<16} {left:>18}{owner}")
         print(f"{'':14}{request.question}")
         if request.options:
             print(f"{'':14}options: {', '.join(request.options)}")
@@ -302,7 +302,11 @@ def _line(entry: RosterEntry, now: int) -> str:
     delay = entry.due_in(now)
     when = "—" if delay is None else ("due" if delay == 0 else _short(delay))
     marker = _MARKER.get(entry.status, "")
-    return f"{entry.bot.slug:<16}{entry.status.value:<18}{when:>8}  {marker}"
+    # `:<16` truncates nothing, so a longer slug simply runs into the
+    # status and the two words join up — `net-fee-researcherscheduled`.
+    # One space is enough to keep the columns readable when a slug
+    # overflows, and costs nothing when it does not.
+    return f"{entry.bot.slug:<16} {entry.status.value:<18}{when:>8}  {marker}"
 
 
 def _detail(entry: RosterEntry, now: int) -> str:

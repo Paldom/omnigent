@@ -22,6 +22,12 @@ from army.workload import Workload
 _logger = logging.getLogger(__name__)
 
 
+#: The one `workload_config` key the workload never sees. It configures the
+#: model-free wake check, which the supervisor evaluates before any workload
+#: exists — see `BotSupervisor._has_work`.
+PRECONDITION = "precondition"
+
+
 class WorkloadRefused(RuntimeError):
     """A bot named a workload this deployment will not load."""
 
@@ -76,7 +82,14 @@ class WorkloadRegistry:
             )
         if ":" not in path:
             raise WorkloadRefused(f"workload must be 'module:Class', got {path!r}")
-        key = f"{path}|{sorted((options or {}).items())}"
+        # `precondition` configures the supervisor's model-free wake check, not
+        # the workload, but both read `workload_config`. Splatting the whole
+        # dict into the constructor raised `unexpected keyword argument
+        # 'precondition'` for the exact config shape `docs/agent-army/bots.md`
+        # prescribes — so a bot following the documentation failed every tick
+        # and retried forever.
+        options = {key: value for key, value in (options or {}).items() if key != PRECONDITION}
+        key = f"{path}|{sorted(options.items())}"
         cached = self._instances.get(key)
         if cached is not None:
             return cached
@@ -87,7 +100,7 @@ class WorkloadRegistry:
         except (ImportError, AttributeError) as exc:
             raise WorkloadRefused(f"cannot load workload {path!r}: {exc}") from exc
         try:
-            workload: Workload = factory(**(options or {}))
+            workload: Workload = factory(**options)
         except TypeError as exc:
             raise WorkloadRefused(f"cannot construct workload {path!r}: {exc}") from exc
         self._instances[key] = workload

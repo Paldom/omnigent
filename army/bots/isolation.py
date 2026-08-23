@@ -56,6 +56,10 @@ VENDOR_CONFIG_DIRS: tuple[str, ...] = (
 #: does not need an approval.
 CONTROL_PLANE_DIRS: tuple[str, ...] = (".omnigent/army",)
 
+#: Where bot workspaces live when a bot has not recorded its own yet. Kept here
+#: rather than imported from `workspace` to avoid a cycle.
+DEFAULT_WORKSPACE_ROOT = Path.home() / "bots"
+
 
 @dataclass(frozen=True)
 class SandboxProfile:
@@ -249,3 +253,36 @@ class Wheel:
             + ". Bot actions are refused rather than queued, because a queued action "
             "would run against whatever page the person navigated to."
         )
+
+
+def sandbox_for(bot: Bot, root: Path | None = None) -> dict[str, object]:
+    """
+    The profile for a bot's next iteration, as plain data for its run record.
+
+    A thin wrapper over :func:`profile_for` that exists so the supervisor has
+    one call to make and so the honest caveat travels with the data. The
+    ``enforced_by`` field is the part worth reading: on a native harness the
+    vendor CLI's own tools are not governed by Omnigent's environment root, and
+    ``docs/OMNIGENT-INTERFACE.md`` in the trading-army repository records a run
+    that was handed ``/tmp`` and read a different repository anyway.
+
+    So this records intent. Treating it as a boundary is the mistake it is
+    written down to prevent.
+
+    :param bot: The bot about to run.
+    :param root: Workspace root, for a bot whose directory is not yet recorded.
+    :returns: The profile, plus what actually enforces it.
+    """
+    base = root or DEFAULT_WORKSPACE_ROOT
+    workspace = Path(bot.workspace) if bot.workspace else base / bot.slug
+    profile = profile_for(bot, workspace)
+    return {
+        **profile.as_dict(),
+        # Not "sandboxed: true". The three channels differ and saying so here
+        # is cheaper than a reader assuming the strongest one.
+        "enforced_by": {
+            "omnigent_file_tools": "environment root",
+            "native_vendor_tools": "nothing — see OMNIGENT-INTERFACE.md §10.2",
+            "process": "none; no Seatbelt profile is applied by this build",
+        },
+    }

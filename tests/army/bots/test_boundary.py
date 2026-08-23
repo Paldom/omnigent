@@ -16,6 +16,12 @@ from pathlib import Path
 
 import pytest
 
+from army.bots.store import BotStore
+from tests.army.bots.conftest import activate, make_bot
+
+NOW = 1_700_000_000
+HEARTBEAT = "army.bots.workloads.heartbeat:HeartbeatWorkload"
+
 ARMY = Path(__file__).resolve().parents[3] / "army"
 
 #: The single sanctioned crossing. ``army/cli.py`` grows one subcommand that
@@ -107,3 +113,66 @@ def test_the_runs_columns_do_belong_to_the_core_store(tmp_path: Path) -> None:
         }
     assert {"bot_id", "revision_id", "outcome"} <= columns
     assert "one_live_run_per_bot" in indexes
+
+
+# ── isolation that is delivered or refused ────────────────────────
+
+
+def test_a_worktree_that_cannot_be_made_refuses_rather_than_sharing(
+    bots: BotStore, tmp_path: Path
+) -> None:
+    """
+    The failure mode this replaces is the dangerous one.
+
+    `_add_worktree` used to log a warning and carry on, so a bot that asked for
+    an isolated checkout silently got the operator's working tree — and then
+    committed into it. A log line nobody reads is not a control.
+    """
+    from army.bots.workspace import Workspace, WorkspaceRefused
+
+    bot = activate(bots, make_bot("researcher", workload=HEARTBEAT), now=NOW)
+    workspace = Workspace(bots, root=tmp_path / "bots")
+    # Not a repository, so `git worktree add` cannot succeed.
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+
+    with pytest.raises(WorkspaceRefused, match="Refusing rather than sharing"):
+        workspace.prepare(bot, now=NOW, source_repo=not_a_repo)
+
+
+def test_every_run_records_what_it_was_allowed_to_touch(bots: BotStore, tmp_path: Path) -> None:
+    """
+    `profile_for` existed and nothing called it, which made the isolation story
+    a design rather than a control — and an uncalled security helper reads
+    exactly like an enforced one to anyone skimming.
+    """
+    from army.bots.isolation import sandbox_for
+
+    bot = make_bot("researcher", workload=HEARTBEAT)
+    bot.workspace = str(tmp_path / "ws")
+    profile = sandbox_for(bot)
+
+    assert profile["write_paths"] == [str(tmp_path / "ws")]
+    # The vendor logins and the control plane are withheld: a bot that can read
+    # either does not need the lane accounting or the approval it was given.
+    denied = " ".join(profile["deny_read_paths"])  # type: ignore[arg-type]
+    assert ".claude" in denied and ".omnigent/army" in denied
+
+
+def test_the_profile_says_what_does_not_enforce_it(bots: BotStore, tmp_path: Path) -> None:
+    """
+    Recording is not enforcing.
+
+    Omnigent's own file tools respect an environment root; the vendor CLIs'
+    native tools do not, and the trading-army repository has a run on record
+    that was handed `/tmp` and read a different repository anyway. Writing
+    `sandboxed: true` here would be the lie that run disproves.
+    """
+    from army.bots.isolation import sandbox_for
+
+    bot = make_bot("researcher", workload=HEARTBEAT)
+    bot.workspace = str(tmp_path / "ws")
+    enforced = sandbox_for(bot)["enforced_by"]
+
+    assert enforced["native_vendor_tools"].startswith("nothing")  # type: ignore[index]
+    assert enforced["process"].startswith("none")  # type: ignore[index]
