@@ -494,6 +494,29 @@ describe("BotsPage", () => {
     expect(await screen.findByText(/A person created it directly/)).toBeInTheDocument();
   });
 
+  it("offsets the status disc only where the text is stacked", async () => {
+    // The disc used to carry `mt-[7px]` itself. That is what it needs beside
+    // the first line of a two-line roster row, and 3.5px of wrongness inside
+    // the centred titlebar — the disc sat visibly below the bot's name.
+    renderPage();
+    await screen.findByText("Merge the candidate patch?");
+
+    const discs = Array.from(document.querySelectorAll("span[aria-hidden]")).filter((el) =>
+      el.className.includes("rounded-full"),
+    );
+    const inRoster = discs.filter((el) => el.closest("button[aria-current]"));
+    expect(inRoster.length).toBeGreaterThan(0);
+    for (const disc of inRoster) expect(disc.className).toContain("mt-[7px]");
+
+    // The titlebar's disc is a sibling of the h1's parent row, not inside it.
+    const bar = screen.getByRole("heading", { level: 1 }).parentElement!;
+    const inTitlebar = Array.from(bar.querySelectorAll("span[aria-hidden]")).filter((el) =>
+      el.className.includes("rounded-full"),
+    );
+    expect(inTitlebar.length).toBe(1);
+    expect(inTitlebar[0].className).not.toContain("mt-[");
+  });
+
   it("says why the system paused a bot, where the roster shows it", async () => {
     listBots.mockResolvedValue(
       fleet({

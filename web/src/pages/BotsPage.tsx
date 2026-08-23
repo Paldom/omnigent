@@ -122,19 +122,37 @@ function TopBand() {
   return <div aria-hidden className="h-14 shrink-0 md:h-12" />;
 }
 
-/** An 8px disc. Colour lives here and nowhere else. */
-function Disc({ status }: { status: BotStatus }) {
+/**
+ * An 8px disc. Colour lives here and nowhere else.
+ *
+ * Carries no vertical offset of its own. It used to hardcode `mt-[7px]`, which
+ * is what a disc needs beside the *first line* of a two-line roster row — and
+ * is 3.5px of wrongness inside a centred titlebar, where the margin shifts the
+ * whole margin box down. One component cannot know which it is in, so the
+ * caller that needs the offset says so.
+ */
+function Disc({ status, className }: { status: BotStatus; className?: string }) {
   const filled = DISC[status];
   return (
     <span
       aria-hidden
       className={cn(
-        "mt-[7px] size-2 shrink-0 rounded-full",
+        "size-2 shrink-0 rounded-full",
         filled ?? "border-[1.5px] border-[var(--status-gray)]",
+        className,
       )}
     />
   );
 }
+
+/**
+ * The offset a disc needs to sit on the first line of a stacked row.
+ *
+ * `(20px line-height - 8px disc) / 2 = 6px`, plus a pixel because the dot
+ * reads low against a cap-height-dominant sans. Named because it appears in
+ * six places and a bare `mt-[7px]` in the seventh is how they drift apart.
+ */
+const DISC_FIRST_LINE = "mt-[7px]";
 
 /** One roster row. Every section uses this, so they cannot drift apart. */
 function Row({
@@ -193,7 +211,7 @@ function RosterRow({
 }) {
   return (
     <Row
-      disc={<Disc status={bot.status} />}
+      disc={<Disc status={bot.status} className={DISC_FIRST_LINE} />}
       name={bot.slug}
       suffix={bot.status}
       reason={reasonFor(bot)}
@@ -222,7 +240,7 @@ function ApprovalCard({
     <section className="mb-2 grid grid-cols-[auto_1fr] gap-x-2 rounded-otto-sm border border-border bg-card px-2.5 py-2">
       <span
         aria-hidden
-        className="mt-[7px] size-2 shrink-0 rounded-full bg-[var(--status-yellow)]"
+        className={cn(DISC_FIRST_LINE, "size-2 shrink-0 rounded-full bg-[var(--status-yellow)]")}
       />
       <div className="min-w-0">
         <h3 className="flex flex-wrap items-baseline gap-1.5 font-medium">
@@ -320,7 +338,10 @@ function OwnerCard({
   const amount = request.evidence.amount ?? request.evidence.usd;
   return (
     <section className="grid grid-cols-[auto_1fr] gap-x-2 rounded-otto-sm border border-border bg-card px-2.5 py-2">
-      <span aria-hidden className="mt-[7px] size-2 shrink-0 rounded-full bg-[var(--status-red)]" />
+      <span
+        aria-hidden
+        className={cn(DISC_FIRST_LINE, "size-2 shrink-0 rounded-full bg-[var(--status-red)]")}
+      />
       <div className="min-w-0">
         <h2 className="flex flex-wrap items-baseline gap-1.5 font-medium">
           Needs your signature
@@ -428,7 +449,7 @@ function DraftCard({
     <section className="grid grid-cols-[auto_1fr] gap-x-2 rounded-otto-sm border border-border bg-card px-2.5 py-2">
       <span
         aria-hidden
-        className="mt-[7px] size-2 shrink-0 rounded-full bg-[var(--status-yellow)]"
+        className={cn(DISC_FIRST_LINE, "size-2 shrink-0 rounded-full bg-[var(--status-yellow)]")}
       />
       <div className="min-w-0">
         <h2 className="flex flex-wrap items-baseline gap-1.5 font-medium">
@@ -948,7 +969,10 @@ export function BotsPage() {
                   disc={
                     <span
                       aria-hidden
-                      className="mt-[7px] size-2 shrink-0 rounded-full bg-[var(--status-red)]"
+                      className={cn(
+                        DISC_FIRST_LINE,
+                        "size-2 shrink-0 rounded-full bg-[var(--status-red)]",
+                      )}
                     />
                   }
                   name={request.verb.replace(/_/g, " ")}
@@ -985,7 +1009,10 @@ export function BotsPage() {
                   disc={
                     <span
                       aria-hidden
-                      className="mt-[7px] size-2 shrink-0 rounded-full border-[1.5px] border-[var(--status-yellow)]"
+                      className={cn(
+                        DISC_FIRST_LINE,
+                        "size-2 shrink-0 rounded-full border-[1.5px] border-[var(--status-yellow)]",
+                      )}
                     />
                   }
                   name={entry.slug}
