@@ -450,8 +450,11 @@ class Supervisor:
         :returns: The requeued run, or ``None`` if another writer won the race.
         """
         session_id, harness, phrase = limited
-        assert self.lanes is not None
-        self.lanes.rate_limited(harness)
+        if self.lanes is not None:
+            # Best-effort and in-memory. A subclass may also have recorded the
+            # limit somewhere that survives a restart, which is what actually
+            # holds the lane closed; this only shapes the current process.
+            self.lanes.rate_limited(harness)
         self._release_lanes(run)
         _logger.warning(
             "run %s: %s hit a %r limit on session %s — cooling that lane and requeueing",

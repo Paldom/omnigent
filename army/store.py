@@ -30,6 +30,11 @@ from army.state import (
     loads,
 )
 
+#: How long a connection waits for a lock before giving up. Two processes share
+#: this file — the supervisor loop and the CLI — so contention is normal and a
+#: connection with no timeout turns every overlap into "database is locked".
+BUSY_TIMEOUT_MS = 5000
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     id              TEXT PRIMARY KEY,
@@ -105,6 +110,12 @@ _ONE_LIVE_RUN_PER_BOT = (
     " WHERE bot_id IS NOT NULL AND state NOT IN ('continue','completed','failed')"
 )
 
+#: The ledger walk. The partial index above covers only *live* rows, so reading
+#: a bot's history would otherwise scan `runs` — which grows one row per
+#: iteration with no retention policy, so it is fine on day one and a table
+#: scan by the end of the month.
+_RUNS_BY_BOT = "CREATE INDEX IF NOT EXISTS ix_runs_bot ON runs (bot_id, created_at DESC)"
+
 
 def add_missing_columns(
     conn: sqlite3.Connection, table: str, columns: tuple[tuple[str, str], ...]
@@ -156,7 +167,14 @@ class Store:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
+        # Outside a transaction, deliberately: `journal_mode` cannot be changed
+        # inside one, and `executescript` issues its own COMMIT. Schema setup is
+        # the one place that is not a transaction, and every statement in it is
+        # idempotent so a torn setup simply re-runs.
+        conn = sqlite3.connect(self.path, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
             # WAL so the supervisor writing does not block the CLI reading
             # status, which is the only concurrency this thing has.
             conn.execute("PRAGMA journal_mode=WAL")
@@ -164,51 +182,32 @@ class Store:
             add_missing_columns(conn, "runs", _RUN_COLUMNS)
             # After the columns exist, never before: the index names one.
             conn.execute(_ONE_LIVE_RUN_PER_BOT)
-
-    @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        """Open a connection that commits on success and rolls back on error."""
-        conn = sqlite3.connect(self.path, isolation_level="DEFERRED")
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
+            conn.execute(_RUNS_BY_BOT)
         finally:
             conn.close()
 
     @contextmanager
-    def atomic(self) -> Iterator[sqlite3.Connection]:
-        """
-        Run several writes as one transaction.
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Open a transaction that commits on success and rolls back on error.
 
-        Every method below opens its own transaction when called on its own,
-        which is right for a single write and wrong for a succession: ending
-        one iteration and scheduling the next are two writes that a crash
-        between would either repeat or lose. Pass the connection this yields as
-        each call's *conn* and they land together or not at all.
+        One policy for every caller, and it is the strict one. A mix of
+        deferred and immediate transactions across two processes is the classic
+        SQLite deadlock: the CLI begins deferred and takes SHARED, the
+        supervisor begins immediate and takes RESERVED, the CLI's write then
+        waits for RESERVED while the supervisor's commit waits for the CLI's
+        SHARED to clear. Neither moves, and one of them gets
+        ``database is locked`` — during a succession, which is the one write
+        that must not be dropped.
 
-        **Nothing inside may do I/O.** Not an HTTP call to Omnigent, not a
-        subprocess, not a queue file. A transaction holds SQLite's write lock,
-        so a network call inside one turns ``army status`` into a hang; worse,
-        a crash mid-call cannot roll the call back, so the effect happened and
-        the row says it did not. Write the intent, commit, do the I/O, record
-        the result in a new transaction — which is what ``effects`` is for.
-
-        ``BEGIN IMMEDIATE`` rather than the default deferred begin: the write
-        lock is taken up front, so two writers queue instead of both reading,
-        both deciding, and the second failing to upgrade. It also puts the
-        compare-and-swap *read* inside the transaction, which a deferred begin
-        would leave outside it.
-
-        :returns: A connection that commits on a clean exit and rolls back on
-            an exception.
+        So there is no deferred path to fall into. Reads pay for a write lock
+        they do not need, which at one box and ten bots costs nothing
+        measurable and removes an entire class of 3am failure.
         """
         conn = sqlite3.connect(self.path, isolation_level=None)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout = 5000")
+        # Per-connection, not per-database: a fresh connection with no timeout
+        # turns every moment of contention into an exception instead of a wait.
+        conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
         conn.execute("BEGIN IMMEDIATE")
         try:
             yield conn
@@ -218,6 +217,35 @@ class Store:
             raise
         finally:
             conn.close()
+
+    @contextmanager
+    def atomic(self) -> Iterator[sqlite3.Connection]:
+        """
+        Run several writes as one transaction.
+
+        Called on its own, every method below opens its own transaction — which
+        is right for a single write and wrong for a succession: ending one
+        iteration and scheduling the next are two writes that a crash between
+        would either repeat or lose. Pass the connection this yields as each
+        call's *conn* and they land together or not at all.
+
+        **Nothing inside may do I/O.** Not an HTTP call to Omnigent, not a
+        subprocess, not a queue file. A transaction holds SQLite's write lock,
+        so a network call inside one turns ``army status`` into a hang; worse,
+        a crash mid-call cannot roll the call back, so the effect happened and
+        the row says it did not. Write the intent, commit, do the I/O, record
+        the result in a new transaction — which is what ``effects`` is for.
+
+        **Nothing inside may open another one.** These are real transactions on
+        real connections, so a nested call self-deadlocks against its own outer
+        lock and waits out the busy timeout before failing. Every store method
+        takes a *conn* for exactly this reason: inside a transaction, pass it.
+
+        :returns: A connection that commits on a clean exit and rolls back on
+            an exception.
+        """
+        with self._connect() as conn:
+            yield conn
 
     def _tx(self, conn: sqlite3.Connection | None) -> AbstractContextManager[sqlite3.Connection]:
         """

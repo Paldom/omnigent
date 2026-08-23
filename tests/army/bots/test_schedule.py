@@ -76,15 +76,18 @@ def test_an_idle_bot_backs_off_monotonically_until_it_reaches_the_ceiling() -> N
     assert all(delay == 3600 for delay in delays[len(growing) :])
 
 
-def test_jitter_spreads_the_ceiling_without_exceeding_it_meaningfully() -> None:
-    """A fleet that goes idle together must not come back together."""
-    policy = _continuous(min_interval_s=60, base_s=60, max_s=3600, factor=2.0, jitter=0.1)
-    delays = _idle_delays(policy, rng=random.Random(7))
+def test_jitter_spreads_a_fleet_sitting_at_the_ceiling(monkeypatch) -> None:
+    """The case jitter exists for, and the one an additive spread lost.
 
-    at_ceiling = [delay for delay in delays if delay >= 3600]
-    assert len(set(at_ceiling)) > 1, "jitter did not spread bots sitting at the ceiling"
-    assert max(delays) <= int(3600 * 1.1)
-    assert min(delays) >= 60
+    Adding jitter then clamping to the cap gave every bot at the maximum the
+    identical delay — no spread at all, precisely when a whole fleet has
+    backed off together. Subtracting keeps the cap honest and still scatters.
+    """
+    policy = _continuous(min_interval_s=60, base_s=60, max_s=3600, factor=2.0, jitter=0.2)
+    at_ceiling = {_idle_delays(policy, rng=random.Random(seed))[-1] for seed in range(20)}
+    assert len(at_ceiling) > 1, "jitter did not spread bots sitting at the ceiling"
+    assert max(at_ceiling) <= 3600, "jitter pushed a delay past its documented cap"
+    assert min(at_ceiling) >= 60
 
 
 def test_backoff_never_dips_below_the_floor() -> None:
@@ -95,15 +98,15 @@ def test_backoff_never_dips_below_the_floor() -> None:
     assert wake.next_due_at - NOW >= 600
 
 
-def test_jitter_only_ever_delays() -> None:
-    """Pulling a wake earlier would let a backed-off bot beat its own floor."""
-    policy = _continuous(min_interval_s=100, base_s=100, jitter=0.5)
+def test_jitter_never_pulls_a_wake_below_the_floor() -> None:
+    """Jitter scatters, but the floor is what actually protects the vendor."""
+    policy = _continuous(min_interval_s=100, base_s=400, max_s=400, jitter=0.9)
     for seed in range(50):
         wake = next_wake(
-            policy, RunOutcome.NO_WORK, now=NOW, idle_streak=0, rng=random.Random(seed)
+            policy, RunOutcome.NO_WORK, now=NOW, idle_streak=1, rng=random.Random(seed)
         )
         assert wake.next_due_at is not None
-        assert wake.next_due_at >= NOW + 100
+        assert NOW + 100 <= wake.next_due_at <= NOW + 400
 
 
 def test_a_bot_that_is_never_busy_is_eventually_paused_rather_than_spun() -> None:
@@ -125,11 +128,22 @@ def test_blocked_has_no_next_wake_and_preserves_both_streaks() -> None:
     assert (wake.idle_streak, wake.error_streak) == (3, 2)
 
 
-def test_rate_limited_leaves_the_bot_due_and_lets_the_shared_gate_hold_it() -> None:
-    """A private backoff on top of the vendor gate would serve two sentences."""
+def test_rate_limited_backs_off_even_when_no_gate_was_written() -> None:
+    """The floor holds without the gate, because the gate is not guaranteed.
+
+    Returning "due now" and trusting the shared vendor gate is only safe if a
+    gate was actually written — and it is not, for a run whose vendor could not
+    be identified, or a bot with no harness pinned. Trusting it meant
+    redispatching every tick against the vendor that had just said stop.
+
+    The streaks are still preserved: a vendor limit says nothing about whether
+    the mission had work or whether the bot is broken.
+    """
     wake = next_wake(_continuous(), RunOutcome.RATE_LIMITED, now=NOW, idle_streak=1, rng=RNG)
-    assert wake.next_due_at == NOW
+    assert wake.next_due_at is not None
+    assert wake.next_due_at > NOW
     assert wake.idle_streak == 1
+    assert wake.error_streak == 0
 
 
 def test_errors_retry_briefly_then_stop() -> None:
@@ -147,6 +161,19 @@ def test_errors_retry_briefly_then_stop() -> None:
     )
     assert exhausted.exhausted
     assert exhausted.next_due_at is None
+
+
+def test_an_empty_iteration_does_not_forgive_a_failing_vendor() -> None:
+    """Alternating error / idle would otherwise never reach the error cap.
+
+    A bot whose vendor call always fails but whose precondition usually says
+    "nothing to do" would pay for a failing turn forever: each error adds one,
+    each empty wake reset it to zero, and the cap was never reached.
+    """
+    wake = next_wake(
+        _continuous(), RunOutcome.NO_WORK, now=NOW, idle_streak=0, error_streak=3, rng=RNG
+    )
+    assert wake.error_streak == 3
 
 
 def test_work_done_clears_an_error_streak() -> None:

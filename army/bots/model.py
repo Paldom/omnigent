@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 
@@ -159,10 +159,14 @@ class WakePolicy:
     :param precondition: Name of a registered LLM-free check. Mandatory for a
         continuous bot: without one, finding out there is nothing to do costs a
         full vendor turn every time.
+    :param anchor: Epoch seconds an rrule is phased from, fixed at activation.
+        Without it the rule re-phases to whenever the last iteration happened,
+        so "daily at nine" drifts by one runtime every day, forever.
     """
 
     kind: WakeKind
     rrule: str | None = None
+    anchor: int | None = None
     min_interval_s: int = 60
     base_s: int = 60
     max_s: int = 3600
@@ -218,6 +222,7 @@ class WakePolicy:
         return WakePolicy(
             kind=kind,
             rrule=spec.get("rrule"),
+            anchor=int(spec["anchor"]) if spec.get("anchor") is not None else None,
             min_interval_s=int(spec.get("min_interval_s", 60)),
             base_s=int(backoff.get("base_s", 60)),
             max_s=int(backoff.get("max_s", 3600)),
@@ -232,6 +237,8 @@ class WakePolicy:
         spec: dict[str, Any] = {"kind": self.kind.value}
         if self.kind is WakeKind.RRULE:
             spec["rrule"] = self.rrule
+            if self.anchor is not None:
+                spec["anchor"] = self.anchor
         if self.kind is WakeKind.CONTINUOUS:
             spec["min_interval_s"] = self.min_interval_s
             spec["backoff"] = {
@@ -245,6 +252,21 @@ class WakePolicy:
         if self.precondition:
             spec["precondition"] = self.precondition
         return spec
+
+    def phased_at(self, when: int) -> WakePolicy:
+        """
+        The same policy, with its recurrence pinned to *when*.
+
+        Called once, at activation. Re-pinning later would reintroduce the
+        drift this exists to stop.
+
+        :param when: Epoch seconds to phase from.
+        :returns: A policy carrying the anchor, or this one if it already has
+            an anchor or is not a recurrence.
+        """
+        if self.kind is not WakeKind.RRULE or self.anchor is not None:
+            return self
+        return replace(self, anchor=when)
 
     def accepts_sender(self, author: str) -> bool:
         """
@@ -303,6 +325,9 @@ class Bot:
     :param workspace: Git worktree path, which is also its docs repo.
     :param browser_profile: Electron partition key / browser profile directory.
     :param docs_ref: Where its documentation lives.
+    :param paused_reason: Why the system paused it, when the system did. A bot
+        paused by a transient fault otherwise looks exactly like one a person
+        stopped on purpose, so nobody restarts it once the fault is fixed.
     :param version: CAS fencing token, same discipline as ``Run.version``.
     :param created_at: Epoch seconds.
     :param updated_at: Epoch seconds of the last write.
@@ -335,6 +360,7 @@ class Bot:
     workspace: str | None = None
     browser_profile: str | None = None
     docs_ref: str | None = None
+    paused_reason: str | None = None
     version: int = 0
 
     @staticmethod

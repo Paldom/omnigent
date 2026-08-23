@@ -97,10 +97,18 @@ def next_wake(
 
     if outcome is RunOutcome.RATE_LIMITED:
         # The vendor gate is shared, so the bot is not individually punished
-        # for a limit that applies to everyone on that lane. It stays due and
-        # the gate is what holds it back — otherwise a fleet on one vendor
-        # would each add their own private backoff on top of the shared one.
-        return Wake(now, WakeReason.SCHEDULE, idle_streak, error_streak)
+        # for a limit that applies to everyone on that lane. But it does not
+        # come back *immediately* either: the gate is only written when the run
+        # identified its vendor, and a bot that trusted a gate that was never
+        # written would redispatch every tick against the vendor that just said
+        # stop — the quota spin this whole model exists to prevent. So the
+        # floor holds even when the gate does not.
+        return Wake(
+            now + _jittered(RETRY_BASE_S, policy.jitter, rng, floor=1),
+            WakeReason.BACKOFF,
+            idle_streak,
+            error_streak,
+        )
 
     if outcome is RunOutcome.RETRYABLE_ERROR:
         streak = error_streak + 1
@@ -108,16 +116,26 @@ def next_wake(
             return Wake(None, WakeReason.HUMAN, idle_streak, streak, exhausted=True)
         delay = _capped(RETRY_BASE_S, streak - 1, policy.factor, RETRY_MAX_S)
         return Wake(
-            now + _jittered(delay, policy.jitter, rng), WakeReason.BACKOFF, idle_streak, streak
+            now + _jittered(delay, policy.jitter, rng, floor=RETRY_BASE_S),
+            WakeReason.BACKOFF,
+            idle_streak,
+            streak,
         )
 
     if outcome is RunOutcome.NO_WORK:
         streak = idle_streak + 1
-        if policy.kind is WakeKind.CONTINUOUS and streak >= MAX_IDLE_STREAK:
-            return Wake(None, WakeReason.HUMAN, streak, 0, exhausted=True)
-        return _scheduled(policy, now, idle_streak=streak, error_streak=0, rng=rng)
+        # The cap applies to every kind. Gating it on `continuous` let a
+        # `FREQ=MINUTELY` bot with a permanently false precondition poll at full
+        # rate forever, which is the same quota loop wearing a schedule.
+        if streak >= MAX_IDLE_STREAK:
+            return Wake(None, WakeReason.HUMAN, streak, error_streak, exhausted=True)
+        # The error streak is *preserved*, not reset. A bot whose vendor call
+        # always fails but whose precondition usually says "empty" would
+        # otherwise alternate error(+1) / idle(reset) and never reach the error
+        # cap — paying for a failing vendor turn forever without ever alarming.
+        return _scheduled(policy, now, idle_streak=streak, error_streak=error_streak, rng=rng)
 
-    # WORK_DONE. The streaks reset: the mission produced something, so neither
+    # WORK_DONE. Both streaks reset: the mission produced something, so neither
     # "nothing to do" nor "keeps failing" is true any more.
     return _scheduled(policy, now, idle_streak=0, error_streak=0, rng=rng)
 
@@ -132,8 +150,17 @@ def _scheduled(
 ) -> Wake:
     """Apply the policy's own rule, given streaks already updated."""
     if policy.kind is WakeKind.RRULE:
+        following = next_occurrence(policy.rrule or "", now, anchor=policy.anchor)
+        if following is None:
+            # A finite rule that has run out. Writing Wake(None, SCHEDULE) would
+            # leave an ACTIVE bot with no wake and no reason, which the stalled
+            # scan then reports as a lost succession every tick forever — for a
+            # bot that simply finished its schedule.
+            return Wake(None, WakeReason.SCHEDULE, idle_streak, error_streak, exhausted=True)
+        # A floor under the rule itself. `FREQ=SECONDLY` parses fine and would
+        # otherwise be honoured literally.
         return Wake(
-            next_occurrence(policy.rrule or "", now),
+            max(following, now + policy.min_interval_s),
             WakeReason.SCHEDULE,
             idle_streak,
             error_streak,
@@ -142,8 +169,9 @@ def _scheduled(
         if idle_streak == 0:
             return Wake(now + policy.min_interval_s, WakeReason.SCHEDULE, 0, error_streak)
         delay = _capped(policy.base_s, idle_streak - 1, policy.factor, policy.max_s)
+        floor = max(delay, policy.min_interval_s)
         return Wake(
-            now + _jittered(max(delay, policy.min_interval_s), policy.jitter, rng),
+            now + _jittered(floor, policy.jitter, rng, floor=policy.min_interval_s),
             WakeReason.BACKOFF,
             idle_streak,
             error_streak,
@@ -166,7 +194,12 @@ def first_wake(policy: WakePolicy, *, now: int) -> Wake:
     :returns: The initial wake.
     """
     if policy.kind is WakeKind.RRULE:
-        return Wake(next_occurrence(policy.rrule or "", now), WakeReason.SCHEDULE, 0, 0)
+        following = next_occurrence(policy.rrule or "", now, anchor=policy.anchor)
+        if following is None:
+            # Activating a bot whose schedule has already run out would make an
+            # ACTIVE bot that can never run. Say so at activation.
+            return Wake(None, WakeReason.SCHEDULE, 0, 0, exhausted=True)
+        return Wake(following, WakeReason.SCHEDULE, 0, 0)
     if policy.kind is WakeKind.CONTINUOUS:
         return Wake(now, WakeReason.SCHEDULE, 0, 0)
     if policy.kind is WakeKind.ON_MESSAGE:
@@ -174,7 +207,7 @@ def first_wake(policy: WakePolicy, *, now: int) -> Wake:
     return Wake(None, WakeReason.MANUAL, 0, 0)
 
 
-def next_occurrence(rule: str, now: int) -> int | None:
+def next_occurrence(rule: str, now: int, *, anchor: int | None = None) -> int | None:
     """
     The first time this rule fires strictly after *now*.
 
@@ -183,21 +216,31 @@ def next_occurrence(rule: str, now: int) -> int | None:
     that was off for a week fires once rather than seven times. Replaying a
     backlog of wakes is the failure this avoids.
 
+    **The anchor is what stops the schedule drifting.** ``dtstart`` is the
+    phase of the recurrence, so anchoring it to *now* re-phases the rule on
+    every evaluation: a bot due at 09:00 that takes twenty minutes settles at
+    09:20, and "daily" then means 09:20 tomorrow, 09:41 the day after, and so
+    on forever. Anchoring to a fixed instant chosen once — activation — keeps
+    "daily at nine" meaning nine.
+
     :param rule: An iCalendar ``RRULE`` string, e.g. ``"FREQ=DAILY;BYHOUR=9"``.
     :param now: Epoch seconds.
+    :param anchor: Epoch seconds the recurrence is phased from. ``None``
+        falls back to *now*, which is right only for a rule whose ``BY`` parts
+        already pin an absolute time of day.
     :returns: Epoch seconds of the next occurrence, or ``None`` for a finite
         rule that has run out.
-    :raises InvalidWakePolicy: If the rule cannot be parsed.
+    :raises InvalidWakePolicy: If the rule or the clock cannot be used.
     """
-    start = datetime.fromtimestamp(now, tz=UTC)
     try:
-        # dtstart anchors an rrule with no DTSTART of its own. Anchoring it to
-        # `now` rather than to a fixed epoch is what makes the answer "the next
-        # one from here" instead of "the next one after some date in 1970".
-        occurrences = rrulestr(rule, dtstart=start)
-    except (ValueError, TypeError) as exc:
-        raise InvalidWakePolicy(f"cannot parse rrule {rule!r}: {exc}") from exc
-    following = occurrences.after(start, inc=False)
+        # Inside the guard: a caller that passes milliseconds — the classic
+        # timestamp bug — raises here rather than killing the tick.
+        start = datetime.fromtimestamp(now, tz=UTC)
+        phase = datetime.fromtimestamp(anchor, tz=UTC) if anchor is not None else start
+        occurrences = rrulestr(rule, dtstart=phase)
+        following = occurrences.after(start, inc=False)
+    except (ValueError, TypeError, OverflowError, OSError) as exc:
+        raise InvalidWakePolicy(f"cannot evaluate rrule {rule!r} at {now}: {exc}") from exc
     if following is None:
         return None
     return int(following.timestamp())
@@ -224,22 +267,31 @@ def _capped(base: int, exponent: int, factor: float, ceiling: int) -> int:
     return int(min(delay, ceiling))
 
 
-def _jittered(delay: int, jitter: float, rng: random.Random | None) -> int:
+def _jittered(delay: int, jitter: float, rng: random.Random | None, *, floor: int = 1) -> int:
     """
     Spread a delay so a fleet that went idle together does not wake together.
 
-    Jitter is added, never subtracted: pulling a wake earlier would let a
-    backed-off bot beat its own floor, which is the one thing the floor is for.
+    Jitter subtracts rather than adds, which is the only way both promises can
+    hold at once. Adding meant the computed ceiling was not a ceiling — a
+    documented "15 minute" error cap became half an hour with jitter 1.0 — and
+    clamping the sum back to the cap removed the spread exactly where it is
+    most needed, with a whole fleet sitting at the maximum.
 
-    :param delay: The computed delay in seconds.
+    Subtracting keeps the cap true and still scatters, at the cost of waking
+    slightly sooner than the nominal delay. That is bounded by *floor*, which
+    is what actually protects the vendor.
+
+    :param delay: The computed delay in seconds, already capped.
     :param jitter: Fraction of *delay* to spread over.
     :param rng: Source of randomness, or ``None`` for the module's own.
-    :returns: The delay, at least *delay*.
+    :param floor: The shortest delay this may return.
+    :returns: A delay in ``[floor, delay]``.
     """
     if jitter <= 0:
-        return delay
+        return max(delay, floor)
     source = rng if rng is not None else _RNG
-    return delay + int(source.random() * jitter * delay)
+    spread = delay - int(source.random() * jitter * delay)
+    return max(spread, floor)
 
 
 #: Module-level source so callers need not thread one through. Tests pass their

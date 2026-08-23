@@ -32,7 +32,7 @@ from army.bots.model import (
 )
 from army.bots.schedule import Wake
 from army.state import loads
-from army.store import ConcurrentTransition, Store
+from army.store import ConcurrentTransition, Store, add_missing_columns
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS bots (
@@ -69,6 +69,9 @@ CREATE TABLE IF NOT EXISTS bots (
 -- reading the fleet, which is the query every tick runs.
 CREATE INDEX IF NOT EXISTS ix_bots_due ON bots (status, next_due_at);
 CREATE INDEX IF NOT EXISTS ix_bots_lineage ON bots (root_bot_id, depth);
+-- The fan-out cap and the retire cascade both walk this, the cascade in a
+-- loop, so a scan per call becomes a scan per descendant.
+CREATE INDEX IF NOT EXISTS ix_bots_parent ON bots (parent_bot_id, created_at);
 
 CREATE TABLE IF NOT EXISTS bot_revisions (
     id         TEXT PRIMARY KEY,
@@ -90,6 +93,11 @@ CREATE TABLE IF NOT EXISTS provider_gates (
     version       INTEGER NOT NULL DEFAULT 0
 );
 """
+
+#: Columns added to ``bots`` after the first release. ``CREATE TABLE IF NOT
+#: EXISTS`` leaves an existing table alone, so a live database needs the same
+#: detect-and-add treatment ``runs`` gets.
+_BOT_COLUMNS: tuple[tuple[str, str], ...] = (("paused_reason", "TEXT"),)
 
 #: ``REFERENCES`` clauses are omitted on purpose. ``army/store.py`` opens every
 #: connection without ``PRAGMA foreign_keys=ON``, so they would enforce nothing
@@ -113,6 +121,7 @@ class BotStore:
             # this is inside and leave the rest of the schema outside it.
             for statement in _statements(_SCHEMA):
                 conn.execute(statement)
+            add_missing_columns(conn, "bots", _BOT_COLUMNS)
 
     def _tx(self, conn: sqlite3.Connection | None) -> AbstractContextManager[sqlite3.Connection]:
         """Join the caller's transaction, or open one for this write alone."""
@@ -179,38 +188,49 @@ class BotStore:
         :returns: The bot, at its new version and revision.
         :raises ConcurrentTransition: If someone else edited it first.
         """
-        with self._tx(conn) as conn:
-            row = conn.execute(
-                "SELECT COALESCE(MAX(rev), 0) AS top FROM bot_revisions WHERE bot_id = ?",
-                (bot.id,),
-            ).fetchone()
-            revision = BotRevision.of(bot, int(row["top"]) + 1, created_by=created_by, now=now)
-            conn.execute(_INSERT_REVISION, _revision_params(revision))
-            self._cas(
-                conn,
-                bot,
-                "current_revision_id = ?, slug = ?, display_name = ?, title = ?,"
-                " persona = ?, mission = ?, workload = ?, workload_config = ?,"
-                " harness = ?, wake = ?, workspace = ?, browser_profile = ?,"
-                " docs_ref = ?, expires_at = ?",
-                (
-                    revision.id,
-                    bot.slug,
-                    bot.display_name,
-                    bot.title,
-                    bot.persona,
-                    bot.mission,
-                    bot.workload,
-                    dumps(bot.workload_config),
-                    bot.harness,
-                    dumps(bot.wake.to_dict()),
-                    bot.workspace,
-                    bot.browser_profile,
-                    bot.docs_ref,
-                    bot.expires_at,
-                ),
-                now=now,
-            )
+        try:
+            with self._tx(conn) as conn:
+                # Read and write inside one transaction. Two concurrent revises
+                # that both read MAX(rev) would otherwise both insert the same
+                # number and the loser would surface a raw SQLite error.
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(rev), 0) AS top FROM bot_revisions WHERE bot_id = ?",
+                    (bot.id,),
+                ).fetchone()
+                revision = BotRevision.of(bot, int(row["top"]) + 1, created_by=created_by, now=now)
+                conn.execute(_INSERT_REVISION, _revision_params(revision))
+                self._cas(
+                    conn,
+                    bot,
+                    "current_revision_id = ?, slug = ?, display_name = ?, title = ?,"
+                    " persona = ?, mission = ?, workload = ?, workload_config = ?,"
+                    " harness = ?, wake = ?, workspace = ?, browser_profile = ?,"
+                    " docs_ref = ?, expires_at = ?",
+                    (
+                        revision.id,
+                        bot.slug,
+                        bot.display_name,
+                        bot.title,
+                        bot.persona,
+                        bot.mission,
+                        bot.workload,
+                        dumps(bot.workload_config),
+                        bot.harness,
+                        dumps(bot.wake.to_dict()),
+                        bot.workspace,
+                        bot.browser_profile,
+                        bot.docs_ref,
+                        bot.expires_at,
+                    ),
+                    now=now,
+                )
+        except sqlite3.IntegrityError as exc:
+            # A duplicate revision number, or a slug someone else took. Both
+            # mean the same thing to the caller — re-read and decide again —
+            # and neither should reach them as a raw SQLite error.
+            raise ConcurrentTransition(
+                f"bot {bot.slug} was edited by someone else; re-read before deciding"
+            ) from exc
         bot.current_revision_id = revision.id
         bot.version += 1
         bot.updated_at = now
@@ -298,12 +318,17 @@ class BotStore:
 
     def due(self, *, now: int, limit: int = 50) -> list[Bot]:
         """
-        Active bots whose wake has arrived and which have no live run.
+        Active bots whose wake has arrived, with no live run and an open vendor.
 
         One query, and it is the whole scan. The live-run condition is a
         correlated ``NOT EXISTS`` rather than a join so a bot with a finished
         run is not filtered out by it, and the partial unique index makes the
         race that slips past it harmless anyway.
+
+        The vendor gate is applied *here*, in SQL, rather than by the caller
+        skipping rows. Filtering afterwards means fifty bots on one cooling
+        vendor fill the page and the fifty-first — on a vendor that is wide
+        open — is never examined until the gate clears.
 
         :param now: Epoch seconds.
         :param limit: Most bots to return in one tick, so a large fleet does
@@ -316,7 +341,30 @@ class BotStore:
                 " AND next_due_at <= ? AND NOT EXISTS ("
                 "  SELECT 1 FROM runs WHERE runs.bot_id = bots.id"
                 "  AND runs.state NOT IN ('continue','completed','failed'))"
+                " AND NOT EXISTS ("
+                "  SELECT 1 FROM provider_gates g WHERE g.vendor = bots.harness"
+                "  AND g.blocked_until > ?)"
                 " ORDER BY next_due_at, id LIMIT ?",
+                (BotStatus.ACTIVE.value, now, now, limit),
+            ).fetchall()
+        return [_row_to_bot(row) for row in rows]
+
+    def expired(self, *, now: int, limit: int = 50) -> list[Bot]:
+        """
+        Active bots past their time-to-live, whatever they are waiting on.
+
+        Expiry used to be checked only for bots the due scan returned, so a
+        child blocked on a human — the one most likely to have been forgotten —
+        stayed ACTIVE forever.
+
+        :param now: Epoch seconds.
+        :param limit: Most to return in one sweep.
+        :returns: Bots to retire.
+        """
+        with self.store.atomic() as conn:
+            rows = conn.execute(
+                "SELECT * FROM bots WHERE status = ? AND expires_at IS NOT NULL"
+                " AND expires_at <= ? ORDER BY expires_at LIMIT ?",
                 (BotStatus.ACTIVE.value, now, limit),
             ).fetchall()
         return [_row_to_bot(row) for row in rows]
@@ -368,7 +416,12 @@ class BotStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def stalled(self, *, now: int) -> list[Bot]:  # noqa: ARG002
+    def stalled(
+        self,
+        *,
+        now: int,  # noqa: ARG002
+        excluding: frozenset[str] | set[str] | None = None,
+    ) -> list[Bot]:
         """
         Active bots that nothing will ever wake, and that nothing is waiting for.
 
@@ -391,10 +444,8 @@ class BotStore:
                 " ORDER BY updated_at",
                 (BotStatus.ACTIVE.value, WakeReason.EVENT.value, WakeReason.MANUAL.value),
             ).fetchall()
-        # A bot blocked on a person is legitimately unscheduled — but only while
-        # something is actually pending for it. That check needs the approvals
-        # table, so the caller filters; this returns the candidates.
-        return [_row_to_bot(row) for row in rows]
+        waiting = excluding or frozenset()
+        return [_row_to_bot(row) for row in rows if row["id"] not in waiting]
 
     # ── writing ───────────────────────────────────────────────────
 
@@ -435,9 +486,15 @@ class BotStore:
                     wake.reason.value if wake.reason is not None else None,
                     wake.idle_streak,
                     wake.error_streak,
-                    outcome.value if outcome is not None else bot.last_outcome,
+                    # The column's value, never the enum. `wake_now` passes no
+                    # outcome, and re-binding `bot.last_outcome` would put a
+                    # Python object where a string belongs.
+                    outcome.value
+                    if outcome is not None
+                    else (bot.last_outcome.value if bot.last_outcome is not None else None),
                 ),
                 now=now,
+                require_status=BotStatus.ACTIVE,
             )
         bot.next_due_at = wake.next_due_at
         bot.wake_reason = wake.reason
@@ -456,6 +513,7 @@ class BotStore:
         *,
         now: int,
         wake: Wake | None = None,
+        reason: str | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> Bot:
         """
@@ -476,8 +534,21 @@ class BotStore:
         :raises ConcurrentTransition: If someone else moved it first.
         """
         assert_legal_bot_move(bot.status, target)
-        columns = "status = ?"
-        params: list[Any] = [target.value]
+        # Why, not just what. A bot the system paused — a bad workload import, a
+        # streak run out, an expired question — otherwise leaves one log line
+        # and then looks identical to one a person paused on purpose, so nobody
+        # un-pauses it when the cause is fixed.
+        columns = "status = ?, paused_reason = ?"
+        params: list[Any] = [target.value, reason if target is BotStatus.PAUSED else None]
+        if target is BotStatus.ACTIVE:
+            # Pin a recurrence's phase, once, here. Anywhere later and the rule
+            # re-phases to whenever the last iteration finished, so "daily at
+            # nine" walks forward by one runtime every day.
+            phased = bot.wake.phased_at(now)
+            if phased is not bot.wake:
+                bot.wake = phased
+                columns += ", wake = ?"
+                params.append(dumps(phased.to_dict()))
         if wake is not None:
             columns += ", next_due_at = ?, wake_reason = ?, idle_streak = ?, error_streak = ?"
             params += [
@@ -494,6 +565,7 @@ class BotStore:
         with self._tx(conn) as conn:
             self._cas(conn, bot, columns, tuple(params), now=now)
         bot.status = target
+        bot.paused_reason = reason if target is BotStatus.PAUSED else None
         if wake is not None:
             bot.next_due_at = wake.next_due_at
             bot.wake_reason = wake.reason
@@ -513,6 +585,7 @@ class BotStore:
         params: tuple[Any, ...],
         *,
         now: int,
+        require_status: BotStatus | None = None,
     ) -> None:
         """
         Apply one conditional update, bumping the fencing version.
@@ -523,16 +596,28 @@ class BotStore:
             ``updated_at`` — this adds both.
         :param params: Values for *assignments*.
         :param now: Epoch seconds.
-        :raises ConcurrentTransition: If the version moved.
+        :param require_status: Refuse unless the row is still in this state.
+            The version check alone is not enough for a wake: a run that
+            settles after a human paused the bot would otherwise write a due
+            time back onto a paused row, so the roster shows a paused bot about
+            to run and resuming it uses a wake nobody chose.
+        :raises ConcurrentTransition: If the version moved or the status did.
         """
+        guard = ""
+        extra: tuple[Any, ...] = ()
+        if require_status is not None:
+            guard = " AND status = ?"
+            extra = (require_status.value,)
         cursor = conn.execute(
             f"UPDATE bots SET {assignments}, version = ?, updated_at = ?"
-            " WHERE id = ? AND version = ?",
-            (*params, bot.version + 1, now, bot.id, bot.version),
+            f" WHERE id = ? AND version = ?{guard}",
+            (*params, bot.version + 1, now, bot.id, bot.version, *extra),
         )
         if cursor.rowcount != 1:
             raise ConcurrentTransition(
-                f"bot {bot.slug} moved on from version {bot.version}; re-read before deciding"
+                f"bot {bot.slug} moved on from version {bot.version}"
+                + (f" or is no longer {require_status.value}" if require_status else "")
+                + "; re-read before deciding"
             )
 
     # ── vendor gates ──────────────────────────────────────────────
@@ -670,6 +755,7 @@ def _row_to_bot(row: sqlite3.Row) -> Bot:
         workspace=row["workspace"],
         browser_profile=row["browser_profile"],
         docs_ref=row["docs_ref"],
+        paused_reason=_optional(row, "paused_reason"),
         version=row["version"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -700,6 +786,14 @@ def _statements(script: str) -> list[str]:
     """
     lines = [line for line in script.splitlines() if not line.strip().startswith("--")]
     return [statement.strip() for statement in "\n".join(lines).split(";") if statement.strip()]
+
+
+def _optional(row: sqlite3.Row, column: str) -> Any:
+    """Read a column a database written by an older binary may not have."""
+    try:
+        return row[column]
+    except (IndexError, KeyError):
+        return None
 
 
 def new_id() -> str:

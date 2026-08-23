@@ -103,19 +103,28 @@ def test_parking_on_a_person_is_not_an_idle_iteration(store: Store, bots: BotSto
     [
         (RunState.WAITING_HUMAN, "work_done", RunOutcome.BLOCKED),
         (RunState.PAUSED, "work_done", RunOutcome.BLOCKED),
-        (RunState.READY, "work_done", RunOutcome.RATE_LIMITED),
         (RunState.FAILED, "work_done", RunOutcome.RETRYABLE_ERROR),
         (RunState.CONTINUE, "no_work", RunOutcome.NO_WORK),
         (RunState.CONTINUE, "work_done", RunOutcome.WORK_DONE),
         (RunState.COMPLETED, "no_work", RunOutcome.NO_WORK),
         (RunState.CONTINUE, None, RunOutcome.WORK_DONE),
-        (RunState.CONTINUE, "nonsense", RunOutcome.WORK_DONE),
+        # A workload may only choose between these two, and an unknown value
+        # fails toward the cautious one rather than the expensive one.
+        (RunState.CONTINUE, "nonsense", RunOutcome.NO_WORK),
+        (RunState.CONTINUE, "blocked", RunOutcome.NO_WORK),
+        (RunState.COMPLETED, "rate_limited", RunOutcome.NO_WORK),
     ],
 )
 def test_only_a_clean_finish_lets_the_workload_choose(
     target: RunState, declared: str | None, expected: RunOutcome
 ) -> None:
-    """The move decides, except where the move is genuinely ambiguous."""
+    """The move decides, except where the move is genuinely ambiguous.
+
+    And even then the workload may only pick between "I did something" and
+    "there was nothing to do". Letting it declare BLOCKED on a terminal move
+    would write ``next_due_at = NULL`` for a run that has ended, and nothing
+    would ever wake the bot again.
+    """
     artifacts = {"outcome": declared} if declared is not None else {}
     run = Run.new("w", {}, now=NOW, bot_id="b")
     run.artifacts = artifacts

@@ -24,8 +24,9 @@ from contextlib import suppress
 from typing import Any
 
 from army.bots.approvals import ITERATION_GATE, ApprovalRequest, ApprovalStore
+from army.bots.budget import BudgetExhausted, BudgetStore
 from army.bots.messages import MessageKind, MessageStore
-from army.bots.model import Bot, BotStatus, RunOutcome, WakeKind
+from army.bots.model import Bot, BotStatus, IllegalBotMove, RunOutcome, WakeKind
 from army.bots.precondition import PreconditionRegistry, UnknownPrecondition
 from army.bots.registry import WorkloadRefused, WorkloadRegistry
 from army.bots.schedule import Wake, next_wake
@@ -39,14 +40,21 @@ from army.workload import Workload
 
 _logger = logging.getLogger(__name__)
 
-#: Run states that settle an iteration and so produce an outcome. ``READY`` is
-#: here because the requeue after a vendor refusal is how a rate limit reaches
-#: the scheduler; ``WAITING_HUMAN`` because parking on a person is the
-#: ``BLOCKED`` outcome, and a bot with no next wake must be recorded as such
-#: rather than left looking scheduled.
+#: Run states that settle an iteration and so produce an outcome.
+#:
+#: ``READY`` is deliberately absent. The requeue after a vendor refusal goes
+#: back to ``READY``, which is still a *live* run — the partial unique index
+#: and the due scan both treat only continue/completed/failed as dead. Settling
+#: there would record an outcome and a next wake for an iteration that has not
+#: ended, and then settle a second time when the run really does finish. The
+#: vendor limit is recorded by :meth:`BotSupervisor._requeue_rate_limited`
+#: instead, which is where the vendor is actually known.
+#:
+#: ``WAITING_HUMAN`` is present because parking on a person genuinely ends the
+#: iteration's use of a body, and a bot with no next wake must be recorded as
+#: such rather than left looking scheduled.
 _SETTLING = frozenset(
     {
-        RunState.READY,
         RunState.WAITING_HUMAN,
         RunState.CONTINUE,
         RunState.PAUSED,
@@ -117,6 +125,7 @@ class BotSupervisor(Supervisor):
         scan_limit: int = 50,
         messages: MessageStore | None = None,
         approvals: ApprovalStore | None = None,
+        budgets: BudgetStore | None = None,
     ) -> None:
         super().__init__(
             store,
@@ -135,6 +144,14 @@ class BotSupervisor(Supervisor):
         # that binds nothing is not a verdict.
         self.messages = messages
         self.approvals = approvals
+        # No ledger means unlimited, which is the right default for a
+        # top-level bot nobody has thought about yet — and the wrong one for
+        # anything that can spawn, which is why `carve` refuses an
+        # unbudgeted parent.
+        self.budgets = budgets
+        #: Bots already reported as stalled, so the alarm fires on the change
+        #: rather than on every tick.
+        self._alarmed: set[str] = set()
 
     # ── the two seams ─────────────────────────────────────────────
 
@@ -160,6 +177,21 @@ class BotSupervisor(Supervisor):
             raise WorkloadRefused(
                 f"run {run.id[:12]} names bot {run.bot_id}, which no longer exists"
             )
+        # The pinned revision, not the live row. An operator who edits a bot's
+        # workload mid-iteration would otherwise have `dispatch` run against
+        # one and `collect` against another — one iteration, two jobs, and
+        # evidence that describes neither.
+        if run.revision_id is not None:
+            revision = self.bots.revision(run.revision_id)
+            if revision is not None:
+                pinned = str(revision.definition.get("workload") or bot.workload)
+                options = revision.definition.get("workload_config") or {}
+                try:
+                    return self.workloads.resolve(pinned, options)
+                except WorkloadRefused as exc:
+                    raise WorkloadRefused(
+                        f"bot {bot.slug!r} (revision {revision.rev}): {exc}"
+                    ) from exc
         return self.workloads.for_bot(bot)
 
     # ── waking ────────────────────────────────────────────────────
@@ -218,7 +250,11 @@ class BotSupervisor(Supervisor):
             # "no work" — pause the bot so it is visible instead of looking
             # permanently idle.
             _logger.error("bot %s names an unknown precondition %r; pausing it", bot.slug, name)
-            self._pause(bot, now=now)
+            self._pause(
+                bot,
+                now=now,
+                reason=f"names a precondition nobody registered: {name!r}",
+            )
             return False
         self._back_off(bot, now=now)
         return False
@@ -250,10 +286,24 @@ class BotSupervisor(Supervisor):
                         bot.slug,
                         wake.idle_streak,
                     )
-                    self.bots.set_status(bot, BotStatus.PAUSED, now=now, conn=conn)
+                    self.bots.set_status(
+                        bot,
+                        BotStatus.PAUSED,
+                        now=now,
+                        reason=f"found nothing to do {wake.idle_streak} times running",
+                        conn=conn,
+                    )
         except ConcurrentTransition:
-            # Another writer moved the bot. Its decision is as good as ours.
-            _logger.debug("bot %s moved while backing it off", bot.slug)
+            # Another writer moved the bot — usually a human pausing or waking
+            # it, whose decision beats ours. Logged at WARNING rather than
+            # DEBUG because the failure mode if this is *not* a human is a bot
+            # that never backs off and polls at full rate, which is a bill.
+            _logger.warning(
+                "bot %s could not be backed off (intended next wake %s); it stays due "
+                "and will be re-examined next tick",
+                bot.slug,
+                wake.next_due_at,
+            )
 
     def _start(self, bot: Bot, *, now: int) -> Run | None:
         """
@@ -274,7 +324,7 @@ class BotSupervisor(Supervisor):
             workload = self.workloads.for_bot(bot)
         except WorkloadRefused:
             _logger.exception("bot %s cannot be dispatched; pausing it", bot.slug)
-            self._pause(bot, now=now)
+            self._pause(bot, now=now, reason="its workload could not be loaded")
             return None
 
         if self._has_live_run(bot):
@@ -300,21 +350,83 @@ class BotSupervisor(Supervisor):
             revision_id=bot.current_revision_id,
         )
         try:
-            return self.store.create_run(run)
-        except ConcurrentTransition:
-            # Reaching here means the live-run check above was wrong, which is
-            # a bug in this method and not a signal the control plane should
-            # act on. Say so loudly, and say what it cost: the work item is
-            # already claimed and no run will do it.
-            _logger.error(
-                "bot %s: the one-live-run index refused a run the live check allowed. "
-                "Work item %r was taken from %s and is now stranded — requeue it by hand. "
-                "This is a supervisor bug, not contention.",
-                bot.slug,
-                item,
-                workload.name,
-            )
+            with self.bots.atomic() as conn:
+                self.store.create_run(run, conn=conn)
+                if self.budgets is not None:
+                    # In the same transaction that materialises the run, so a
+                    # crash cannot leave an iteration nobody paid for — which
+                    # over a long enough night is how a budget stops meaning
+                    # anything.
+                    self.budgets.charge(bot.id, run_id=run.id, now=now, conn=conn)
+            return run
+        except BudgetExhausted as exc:
+            # The only backstop against a poison mission: a bot that reports
+            # work done every time has no idle streak to back it off. Pause and
+            # say so — a silent stall looks exactly like a bot that is working.
+            _logger.warning("bot %s: %s", bot.slug, exc)
+            self._pause(bot, now=now, reason=str(exc))
+            self._say(bot, f"Paused: {exc}", now=now)
             return None
+        except ConcurrentTransition:
+            # The live-run check above raced something — another tick, or the
+            # CLI. The index did its job; the problem is the work item, which
+            # `acquire` has already claimed. Hand it back if the workload knows
+            # how, and say plainly what was lost if it does not.
+            if self._release(workload, item):
+                _logger.info(
+                    "bot %s: the run was refused after acquiring %s; the item was returned",
+                    bot.slug,
+                    _describe(item),
+                )
+            else:
+                _logger.error(
+                    "bot %s: the one-live-run index refused a run after %s was taken from %s, "
+                    "and that workload has no release() — the item is stranded and must be "
+                    "requeued by hand.",
+                    bot.slug,
+                    _describe(item),
+                    workload.name,
+                )
+            return None
+
+    def _say(self, bot: Bot, body: str, *, now: int) -> None:
+        """
+        Put a line in the bot's channel, when there is one.
+
+        For the things an operator only finds out about by reading logs
+        otherwise: a pause, a refill, an expiry.
+
+        :param bot: Whose channel.
+        :param body: What to say.
+        :param now: Epoch seconds.
+        """
+        if self.messages is None:
+            return
+        with suppress(Exception):
+            self.messages.post(bot.id, "system", MessageKind.EVENT, body, now=now)
+
+    @staticmethod
+    def _release(workload: Workload, item: dict[str, Any]) -> bool:
+        """
+        Give a claimed work item back, when the workload knows how.
+
+        ``acquire`` has a side effect — the demo workload marks its queue line
+        ``taken:`` — so an item taken for a run that is then refused is an item
+        nobody will do. A workload that cares implements ``release(item)``.
+
+        :param workload: The workload the item came from.
+        :param item: The item to hand back.
+        :returns: Whether it was returned.
+        """
+        hook = getattr(workload, "release", None)
+        if not callable(hook):
+            return False
+        try:
+            hook(item)
+        except Exception:
+            _logger.exception("workload %s could not release an item", workload.name)
+            return False
+        return True
 
     def _has_live_run(self, bot: Bot) -> bool:
         """
@@ -355,17 +467,34 @@ class BotSupervisor(Supervisor):
         """
         if bot.expires_at is None or bot.expires_at > now:
             return False
-        _logger.info("bot %s reached its expiry; retiring it", bot.slug)
-        with suppress(ConcurrentTransition):
+        try:
             self.bots.set_status(bot, BotStatus.RETIRED, now=now)
+        except (ConcurrentTransition, IllegalBotMove) as exc:
+            # Claiming it was retired when the write lost would skip the bot
+            # this tick *and* leave it ACTIVE — the worst of both. Say it did
+            # not happen; the next tick tries again from a fresh read.
+            _logger.warning(
+                "bot %s reached its expiry but could not be retired: %s", bot.slug, exc
+            )
+            return False
+        _logger.info("bot %s reached its expiry and was retired", bot.slug)
+        self._say(bot, "Retired: its time-to-live expired.", now=now)
         return True
 
-    def _pause(self, bot: Bot, *, now: int) -> None:
-        """Stop scheduling a bot, tolerating a race with another writer."""
+    def _pause(self, bot: Bot, *, now: int, reason: str) -> None:
+        """
+        Stop scheduling a bot, recording why and tolerating a race.
+
+        :param bot: The bot.
+        :param now: Epoch seconds.
+        :param reason: What the system objected to. Without it a bot paused by
+            a transient fault is indistinguishable from one a person stopped,
+            so nobody restarts it when the fault is fixed.
+        """
         try:
-            self.bots.set_status(bot, BotStatus.PAUSED, now=now)
-        except ConcurrentTransition:
-            _logger.debug("bot %s moved while pausing it", bot.slug)
+            self.bots.set_status(bot, BotStatus.PAUSED, now=now, reason=reason)
+        except (ConcurrentTransition, IllegalBotMove) as exc:
+            _logger.warning("bot %s could not be paused (%s); retrying next tick", bot.slug, exc)
 
     # ── asking ────────────────────────────────────────────────────
 
@@ -534,7 +663,11 @@ class BotSupervisor(Supervisor):
         if run.bot_id is None or target not in _SETTLING:
             return super()._transition(run, target, **kwargs)
 
-        now = kwargs.get("now") or int(time.time())
+        # `or` would read a deliberate now=0 as "unset" and silently use the
+        # wall clock, which makes a test that pins the epoch pass for the wrong
+        # reason and a replay drift.
+        supplied = kwargs.get("now")
+        now = int(time.time()) if supplied is None else supplied
         bot = self.bots.get(run.bot_id)
         if bot is None:
             # An orphaned run. Let it finish; there is nothing to schedule.
@@ -548,8 +681,18 @@ class BotSupervisor(Supervisor):
             idle_streak=bot.idle_streak,
             error_streak=bot.error_streak,
         )
-        if outcome is RunOutcome.RATE_LIMITED:
-            self._cool_vendor(run, now=now)
+        # The single most important write in the system, and it used to emit
+        # nothing. At 3am the symptom is a stalled alarm with no run id, no
+        # outcome, and no way to tell which transition wrote the NULL.
+        _logger.info(
+            "bot %s: run %s -> %s (%s); next wake %s%s",
+            bot.slug,
+            run.id[:12],
+            target.value,
+            outcome.value,
+            wake.next_due_at if wake.next_due_at is not None else "none",
+            " [streak exhausted]" if wake.exhausted else "",
+        )
 
         with self.bots.atomic() as conn:
             moved = self.store.transition(run, target, outcome=outcome.value, conn=conn, **kwargs)
@@ -561,26 +704,77 @@ class BotSupervisor(Supervisor):
                     wake.idle_streak,
                     wake.error_streak,
                 )
-                self.bots.set_status(bot, BotStatus.PAUSED, now=now, conn=conn)
+                self.bots.set_status(
+                    bot,
+                    BotStatus.PAUSED,
+                    now=now,
+                    reason=(
+                        f"gave up after {wake.error_streak} failures"
+                        if wake.error_streak
+                        else f"found nothing to do {wake.idle_streak} times running"
+                    ),
+                    conn=conn,
+                )
         return moved
 
-    def _cool_vendor(self, run: Run, *, now: int) -> None:
+    def _requeue_rate_limited(
+        self, run: Run, limited: tuple[str, str, str], *, now: int
+    ) -> Run | None:
         """
-        Record a vendor limit where a restart cannot forget it.
+        Cool the vendor durably, then requeue as the base class does.
+
+        This is where the vendor is actually known — the base class was handed
+        ``(session, harness, phrase)`` by the check that found the refusal.
+        Reading it back out of the run's artifacts later meant a workload that
+        did not record them produced no gate at all, silently, and after a
+        restart every bot on that vendor fired at once.
 
         ``Lane.cooldown_until`` lives in RAM and is rebuilt empty on every
-        start, so without this a reboot makes every bot on a limited vendor
-        instantly due again — the quota spin the outcome model exists to stop.
+        start, which is the whole reason ``provider_gates`` exists.
 
-        :param run: The run that hit the limit.
+        :param run: The run whose session was refused.
+        :param limited: ``(session_id, harness, phrase)``.
         :param now: Epoch seconds.
+        :returns: The requeued run.
         """
-        harness = str(run.artifacts.get("rate_limited_harness") or "")
-        if not harness:
-            return
+        _session_id, harness, phrase = limited
         seconds = self.lanes.default_cooldown_seconds if self.lanes is not None else 300
-        reason = str(run.artifacts.get("rate_limited_phrase") or "vendor reported a limit")
-        self.bots.block_vendor(harness, now + seconds, reason)
+        self.bots.block_vendor(harness, now + seconds, phrase)
+        _logger.warning(
+            "%s reported %r; the lane is closed until %d and every bot on it waits",
+            harness,
+            phrase,
+            now + seconds,
+        )
+        return super()._requeue_rate_limited(run, limited, now=now)
+
+    def _dispatch(self, run: Run, *, now: int) -> Run | None:
+        """
+        Hold a run back while its vendor is cooling, durably.
+
+        The base class consults the in-memory lanes, which are empty after a
+        restart. A run already sitting in ``READY`` because that vendor refused
+        it is *live*, so the wake scan never sees it and never applies the
+        durable gate — and the first tick after a reboot sends it straight back
+        to the vendor that just said stop.
+
+        :param run: The run in ``READY``.
+        :param now: Epoch seconds.
+        :returns: The run after dispatching, or ``None`` while it waits.
+        """
+        bot = self.bots.get(run.bot_id or "")
+        if bot is not None and bot.harness is not None:
+            blocked = self.bots.blocked_vendors(now=now)
+            until = blocked.get(bot.harness)
+            if until is not None:
+                _logger.debug(
+                    "holding %s: the %s lane is closed for another %ds",
+                    bot.slug,
+                    bot.harness,
+                    until - now,
+                )
+                return None
+        return super()._dispatch(run, now=now)
 
     # ── the authorisation path ────────────────────────────────────
 
@@ -718,7 +912,7 @@ class BotSupervisor(Supervisor):
                 )
             bot = self.bots.get(request.bot_id)
             if bot is not None and bot.status is BotStatus.ACTIVE:
-                self._pause(bot, now=now)
+                self._pause(bot, now=now, reason="a question expired unanswered")
 
     # ── operator view ─────────────────────────────────────────────
 
@@ -737,24 +931,65 @@ class BotSupervisor(Supervisor):
         stamp = int(time.time()) if now is None else now
         self._deliver_mail(now=stamp)
         self._expire_approvals(now=stamp)
+        self._retire_expired(now=stamp)
         report = self.tick(now=stamp)
-        for bot in self.bots.stalled(now=stamp):
-            # A lost succession is otherwise invisible: the bot is active, has
-            # no run, and nothing is scheduled to notice.
-            _logger.error(
-                "bot %s is active with no run and no next wake (last outcome %s) — "
-                "its succession was lost; `army bots wake %s` restarts it",
-                bot.slug,
-                bot.last_outcome.value if bot.last_outcome else "none",
-                bot.slug,
-            )
+        self._raise_alarms(now=stamp)
         return report
 
+    def _raise_alarms(self, *, now: int) -> None:
+        """
+        Report bots nothing will ever wake — once each, not once per tick.
 
-#: Moves whose outcome only the workload can know. Everything else is decided
-#: by the move itself, because the move already says what happened and a
-#: declaration made earlier in the iteration cannot contradict it.
-_WORKLOAD_DECIDES = frozenset({RunState.CONTINUE, RunState.COMPLETED})
+        A lost succession is otherwise invisible: the bot is active, has no run,
+        and nothing is scheduled to notice. But an unthrottled alarm is its own
+        failure — the same line every ten seconds for a week is noise, and the
+        night it finally means something nobody is reading it.
+
+        :param now: Epoch seconds.
+        """
+        waiting = (
+            {request.bot_id for request in self.approvals.pending()}
+            if self.approvals is not None
+            else set()
+        )
+        stalled = self.bots.stalled(now=now, excluding=waiting)
+        current = {bot.id for bot in stalled}
+        for bot in stalled:
+            if bot.id in self._alarmed:
+                continue
+            _logger.error(
+                "bot %s is active with no run, no next wake and nothing pending "
+                "(last outcome %s, wake reason %s, idle since %ds ago) — its succession "
+                "was lost; `army bots wake %s` restarts it",
+                bot.slug,
+                bot.last_outcome.value if bot.last_outcome else "none",
+                bot.wake_reason.value if bot.wake_reason else "none",
+                now - bot.updated_at,
+                bot.slug,
+            )
+        for recovered in self._alarmed - current:
+            _logger.info("bot %s is scheduled again", recovered)
+        self._alarmed = current
+
+    def _retire_expired(self, *, now: int) -> None:
+        """
+        Retire bots past their time-to-live, whatever they are waiting on.
+
+        Expiry used to be checked only inside the due scan, so the bot most
+        likely to have been forgotten — a child parked on a question nobody
+        answered — was the one that could never reach the check.
+
+        :param now: Epoch seconds.
+        """
+        for bot in self.bots.expired(now=now, limit=self.scan_limit):
+            self._retire_if_expired(bot, now=now)
+
+
+#: The only two outcomes a workload may declare for itself. Every other value
+#: describes something the *supervisor* observed — a person, a vendor, a
+#: failure — and letting a workload claim one would let it write scheduler
+#: state it has no way to know is true.
+_WORKLOAD_MAY_DECLARE = frozenset({RunOutcome.WORK_DONE.value, RunOutcome.NO_WORK.value})
 
 
 def classify(run: Run, target: RunState) -> RunOutcome:
@@ -788,24 +1023,45 @@ def classify(run: Run, target: RunState) -> RunOutcome:
         # so neither streak should move, and BLOCKED is the outcome that leaves
         # both alone.
         return RunOutcome.BLOCKED
-    if target is RunState.READY:
-        # The only way back to READY from a working state is the requeue after
-        # a vendor refused on quota.
-        return RunOutcome.RATE_LIMITED
     if target is RunState.FAILED:
         return RunOutcome.RETRYABLE_ERROR
 
     declared = run.artifacts.get("outcome")
-    if target in _WORKLOAD_DECIDES and isinstance(declared, str):
-        try:
+    if isinstance(declared, str):
+        # A workload may choose between "I did something" and "there was
+        # nothing to do", and nothing else. It must not be able to declare
+        # BLOCKED on a terminal move: that writes next_due_at = NULL on a bot
+        # whose run has ended, and nothing would ever wake it again.
+        if declared in _WORKLOAD_MAY_DECLARE:
             return RunOutcome(declared)
-        except ValueError:
-            _logger.warning(
-                "run %s declared an unknown outcome %r; treating the iteration as work done",
-                run.id[:12],
-                declared,
-            )
+        _logger.warning(
+            "run %s declared %r, which a workload may not choose (only %s); "
+            "treating the iteration as having found no work",
+            run.id[:12],
+            declared,
+            " or ".join(sorted(_WORKLOAD_MAY_DECLARE)),
+        )
+        # Fail toward NO_WORK, not WORK_DONE. The wrong guess here is the one
+        # that keeps a continuous bot at its floor, which is the quota loop.
+        return RunOutcome.NO_WORK
     return RunOutcome.WORK_DONE
+
+
+def _describe(item: dict[str, Any]) -> str:
+    """
+    Name a work item for a log line without pasting its payload.
+
+    A run's item can carry a whole file. ``%r`` on it turns one warning into a
+    megabyte of log and buries the sentence that mattered.
+
+    :param item: The work item.
+    :returns: A short description.
+    """
+    for key in ("id", "task", "title", "path", "name"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return f"{key}={value[:80]!r}"
+    return f"an item with keys {sorted(item)[:5]}"
 
 
 def wake_now(
