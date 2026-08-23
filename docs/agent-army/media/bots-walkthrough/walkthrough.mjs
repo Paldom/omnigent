@@ -215,6 +215,29 @@ await say(
   4600,
 );
 await hide();
+
+// ── 4a. the workspace, which is real ────────────────────────────
+await say(
+  "Its workspace, not a picture of one",
+  "The dock browses the directory on disk. This panel used to be three hardcoded filenames — it " +
+    "looked like a file browser and was a drawing of one.",
+  5400,
+);
+await hide();
+await page.getByText("charter.md").click();
+await page.waitForTimeout(1400);
+await mount();
+await say(
+  "The documents you steer it with",
+  "charter, runbook, lessons — previewed as markdown, because these are the files a person edits to " +
+    "change what the bot does. The content lives in git; the database only indexes it.",
+  5600,
+);
+await hide();
+await page.getByRole("button", { name: "← back" }).click();
+await page.waitForTimeout(900);
+
+// ── 4b. the ledger, and the body behind it ──────────────────────
 await page.getByRole("button", { name: "Runs" }).click();
 await page.waitForTimeout(1000);
 await mount();
@@ -233,6 +256,23 @@ await say(
   "A continuous bot must declare a model-free precondition. Without one, finding out there is " +
     "nothing to do costs a full vendor turn every interval.",
   5200,
+);
+await hide();
+
+// ── 4c. the running harness ─────────────────────────────────────
+await select(/^cartographer/);
+await mount();
+await say(
+  "The body behind the bot",
+  "cartographer is running. A bot's body is an ordinary Omnigent session, so there is nothing to " +
+    "reimplement here — <em>Open session</em> goes to the real chat page.",
+  5400,
+);
+await say(
+  "Everything a normal session has",
+  "Transcript, tool calls, files, terminals, browser, subagents. Rebuilding a worse copy of that " +
+    "inside this page would be the wrong trade.",
+  5000,
 );
 await hide();
 
@@ -271,6 +311,25 @@ await say(
   "The fleet grew, by a human's hand",
   "prospector-child is active with its own budget, its own workspace and its own browser partition.",
   4800,
+);
+await hide();
+
+// ── 6. the chain, now that there is one ─────────────────────────
+await select(/^scout/);
+await page.getByRole("button", { name: "Lineage" }).click();
+await page.waitForTimeout(1200);
+await mount();
+await say(
+  "The chain it sits in",
+  "Depth and fan-out are the caps that bound replication, and until now nothing rendered them — " +
+    "invisible at exactly the moment they matter, which is the one you just had.",
+  5800,
+);
+await say(
+  "One action with a wider blast radius",
+  "Retiring scout would retire prospector-child with it. That is the only thing on this page that " +
+    "reaches past the row you clicked, so the panel says so rather than leaving you to find out.",
+  5600,
 );
 await hide();
 await page.waitForTimeout(1200);
