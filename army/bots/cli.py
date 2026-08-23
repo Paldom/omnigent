@@ -17,7 +17,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from army.bots.approvals import ApprovalRefused, ApprovalStore, owner_broker
 from army.bots.definition import EXAMPLE, InvalidDefinition, load_file, to_bot, to_yaml
+from army.bots.messages import MessageKind, MessageStore
 from army.bots.model import Bot, BotStatus, DerivedStatus, IllegalBotMove
 from army.bots.precondition import PreconditionRegistry
 from army.bots.registry import WorkloadRegistry
@@ -26,6 +28,7 @@ from army.bots.schedule import first_wake
 from army.bots.store import BotStore
 from army.bots.supervisor import BotSupervisor, wake_now
 from army.config import Config
+from army.gates import GateRefused, Grant
 from army.lanes import Lanes
 from army.omni import OmniClient
 from army.store import ConcurrentTransition, Store
@@ -46,6 +49,12 @@ def _open(config: Config) -> tuple[Store, BotStore]:
     return store, BotStore(store)
 
 
+def _channel(config: Config) -> tuple[BotStore, MessageStore, ApprovalStore]:
+    """Open the bot tables, the channel and the approval ledger."""
+    _, bots = _open(config)
+    return bots, MessageStore(bots), ApprovalStore(bots, owner_broker(bots))
+
+
 def _fleet(config: Config) -> tuple[Store, BotStore, BotSupervisor]:
     """Wire a supervisor that can drive the whole roster."""
     store, bots = _open(config)
@@ -62,8 +71,125 @@ def _fleet(config: Config) -> tuple[Store, BotStore, BotSupervisor]:
         preconditions=PreconditionRegistry(),
         lanes=lanes,
         max_concurrent_runs=config.max_concurrent_runs,
+        messages=MessageStore(bots),
+        approvals=ApprovalStore(bots, owner_broker(bots)),
     )
     return store, bots, supervisor
+
+
+def cmd_pending(config: Config, args: argparse.Namespace) -> int:
+    """
+    Show every question waiting on a person.
+
+    :param config: Resolved configuration.
+    :param args: Uses ``--bot``.
+    :returns: Process exit code.
+    """
+    bots, _, approvals = _channel(config)
+    outstanding = approvals.pending(bot_id=_bot_id(bots, args.bot) if args.bot else None)
+    if not outstanding:
+        print("nothing is waiting on you")
+        return 0
+    now = int(time.time())
+    for request in outstanding:
+        bot = bots.get(request.bot_id)
+        owner = " OWNER-ONLY" if request.requires_owner else ""
+        left = ""
+        if request.expires_at is not None:
+            left = f"expires in {_short(request.expires_at - now)}"
+        print(f"{request.id[:12]}  {bot.slug if bot else request.bot_id:<16}{left:>18}{owner}")
+        print(f"{'':14}{request.question}")
+        if request.options:
+            print(f"{'':14}options: {', '.join(request.options)}")
+        print(f"{'':14}army bots approve {request.id[:12]} --choice <option>")
+    return 0
+
+
+def cmd_verdict(config: Config, args: argparse.Namespace) -> int:
+    """
+    Answer a question, bound to the operation it was asked about.
+
+    :param config: Resolved configuration.
+    :param args: Uses ``approval``, ``--choice`` and ``--grant``.
+    :returns: Process exit code.
+    """
+    _, messages, approvals = _channel(config)
+    request = approvals.get(args.approval)
+    if request is None:
+        print(f"no approval matching {args.approval!r}", file=sys.stderr)
+        return 1
+
+    grant = None
+    if getattr(args, "grant", None):
+        try:
+            grant = Grant.from_token(args.grant)
+        except GateRefused as exc:
+            print(f"{exc}", file=sys.stderr)
+            return 1
+
+    approved = args.command == "approve"
+    now = int(time.time())
+    run = Store(config.state_path).get_run(request.run_id)
+    try:
+        command = approvals.decide(
+            request,
+            approved=approved,
+            decided_by=f"human:{_whoami()}",
+            now=now,
+            choice=getattr(args, "choice", None),
+            # Re-checked against the run as it stands now, so a verdict cannot
+            # be applied to an iteration that moved on while it sat waiting.
+            run_version=run.version if run is not None else None,
+            grant=grant,
+        )
+    except (ApprovalRefused, ConcurrentTransition) as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
+
+    messages.post(
+        request.bot_id,
+        f"human:{_whoami()}",
+        MessageKind.VERDICT,
+        f"{'Approved' if approved else 'Denied'}"
+        + (f": {args.choice}" if getattr(args, "choice", None) else ""),
+        now=now,
+        payload={"approval_id": request.id, "approved": approved},
+        thread_id=request.thread_id,
+        run_id=request.run_id,
+        command_id=command.id,
+    )
+    print(f"recorded {command.kind.value} for {request.id[:12]}; the loop applies it next tick")
+    return 0
+
+
+def cmd_channel(config: Config, args: argparse.Namespace) -> int:
+    """
+    Read a bot's channel.
+
+    :param config: Resolved configuration.
+    :param args: Uses ``bot``, ``--after`` and ``--limit``.
+    :returns: Process exit code.
+    """
+    bots, messages, _ = _channel(config)
+    bot = _resolve(bots, args.bot)
+    if bot is None:
+        return 1
+    rows = messages.channel(bot.id, after_seq=args.after, limit=args.limit)
+    if not rows:
+        print(f"{bot.slug}'s channel is empty")
+        return 0
+    for message in rows:
+        thread = f" [{message.thread_id[:8]}]" if message.thread_id else ""
+        print(f"{message.seq:>5}  {message.kind.value:<12}{message.author:<20}{thread}")
+        for line in message.body.splitlines() or [""]:
+            print(f"{'':7}{line}")
+    return 0
+
+
+def _bot_id(bots: BotStore, name: str) -> str | None:
+    """Resolve a slug to an id for a filter, without complaining when absent."""
+    bot = bots.by_slug(name) or bots.get(name)
+    return bot.id if bot else None
 
 
 def cmd_create(config: Config, args: argparse.Namespace) -> int:
@@ -439,3 +565,24 @@ def add_parser(sub: argparse._SubParsersAction, common: argparse.ArgumentParser)
 
     example = inner.add_parser("example", help="print a working definition", parents=[common])
     example.set_defaults(func=cmd_example)
+
+    pending = inner.add_parser("pending", help="questions waiting on you", parents=[common])
+    pending.add_argument("--bot", help="restrict to one bot")
+    pending.set_defaults(func=cmd_pending)
+
+    for name, help_text in (("approve", "answer yes"), ("deny", "answer no")):
+        verdict = inner.add_parser(name, help=help_text, parents=[common])
+        verdict.add_argument("approval", help="approval id or prefix")
+        verdict.add_argument("--choice", help="which option, for a multi-option question")
+        verdict.add_argument(
+            "--grant",
+            help="a signed owner grant token, required for spend / execute_order / "
+            "add_dependency — a channel verdict alone never satisfies those",
+        )
+        verdict.set_defaults(func=cmd_verdict)
+
+    channel = inner.add_parser("channel", help="read a bot's channel", parents=[common])
+    channel.add_argument("bot", help="slug or id prefix")
+    channel.add_argument("--after", type=int, default=0, help="resume from a sequence number")
+    channel.add_argument("--limit", type=int, default=50)
+    channel.set_defaults(func=cmd_channel)

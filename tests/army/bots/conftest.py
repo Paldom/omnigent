@@ -30,6 +30,9 @@ class FakeOmni:
         self.asked: list[tuple[str, str, list[str]]] = []
         self.harness: str | None = None
         self.tail: str = ""
+        #: What a person typed into the session after the question. The bot
+        #: supervisor must read these and refuse to treat them as an answer.
+        self.replies: list[str] = []
 
     def create_session(self, agent_id: str, **kwargs: Any) -> str:
         session_id = f"conv_{len(self.sessions):032d}"
@@ -50,7 +53,7 @@ class FakeOmni:
         )
 
     def replies_after(self, session_id: str, marker: str) -> list[str]:
-        return []
+        return list(self.replies)
 
     def was_told(self, session_id: str, text: str) -> bool:
         return True

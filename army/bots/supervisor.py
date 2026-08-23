@@ -23,14 +23,16 @@ import time
 from contextlib import suppress
 from typing import Any
 
+from army.bots.approvals import ITERATION_GATE, ApprovalRequest, ApprovalStore
+from army.bots.messages import MessageKind, MessageStore
 from army.bots.model import Bot, BotStatus, RunOutcome, WakeKind
 from army.bots.precondition import PreconditionRegistry, UnknownPrecondition
 from army.bots.registry import WorkloadRefused, WorkloadRegistry
 from army.bots.schedule import Wake, next_wake
 from army.bots.store import BotStore
 from army.lanes import Lanes
-from army.omni import OmniClient, OmniError
-from army.state import Run, RunState
+from army.omni import OmniClient, OmniError, barrier_marker
+from army.state import Command, Run, RunState
 from army.store import ConcurrentTransition, Store
 from army.supervisor import Supervisor, TickReport, _asking_session
 from army.workload import Workload
@@ -113,6 +115,8 @@ class BotSupervisor(Supervisor):
         lanes: Lanes | None = None,
         max_concurrent_runs: int = 3,
         scan_limit: int = 50,
+        messages: MessageStore | None = None,
+        approvals: ApprovalStore | None = None,
     ) -> None:
         super().__init__(
             store,
@@ -125,6 +129,12 @@ class BotSupervisor(Supervisor):
         self.workloads = workloads
         self.preconditions = preconditions or PreconditionRegistry()
         self.scan_limit = scan_limit
+        # The channel and the approval ledger are optional so the scheduler can
+        # be tested without them, but a deployment always has both: an ask that
+        # exists only in a run's artifacts is not addressable, and a verdict
+        # that binds nothing is not a verdict.
+        self.messages = messages
+        self.approvals = approvals
 
     # ── the two seams ─────────────────────────────────────────────
 
@@ -387,6 +397,15 @@ class BotSupervisor(Supervisor):
         }
         approval_id = f"barrier_{run.id}"
 
+        # The ledger row, and the channel message that renders it. Written
+        # before the transition so a crash leaves an unanswered question rather
+        # than a run parked on a question that was never recorded — and
+        # withdrawn below if the transition then loses its race.
+        request = self._record_ask(run, question, options, evidence, now=now)
+        if request is not None:
+            approval_id = request.id
+            artifacts["approval_request_id"] = request.id
+
         session_id = _asking_session(run)
         if session_id is not None:
             try:
@@ -409,13 +428,90 @@ class BotSupervisor(Supervisor):
                     run.id[:12],
                 )
 
-        return self._transition(
-            run,
-            RunState.WAITING_HUMAN,
-            artifacts=artifacts,
-            approval_id=approval_id,
+        try:
+            return self._transition(
+                run,
+                RunState.WAITING_HUMAN,
+                artifacts=artifacts,
+                approval_id=approval_id,
+                now=now,
+            )
+        except Exception:
+            # The question was recorded and the run did not park, so nobody is
+            # waiting on it. Leaving it pending would show the operator a
+            # question whose answer could never be applied.
+            if request is not None and self.approvals is not None:
+                self.approvals.cancel(request, now=now, reason="the run did not park")
+            raise
+
+    def _record_ask(
+        self,
+        run: Run,
+        question: str,
+        options: list[str],
+        evidence: dict[str, Any],
+        *,
+        now: int,
+    ) -> ApprovalRequest | None:
+        """
+        Write the approval row and the channel message that shows it.
+
+        Both or neither: an ask in the ledger that nobody can see is a bot that
+        looks stuck for no reason, and a message with no ledger row behind it is
+        a question a verdict cannot be bound to.
+
+        The verb is :data:`~army.bots.approvals.ITERATION_GATE` — deliberately
+        not the name of anything a bot can do. "May this iteration continue" and
+        "may you spend money" must never be the same question with a different
+        label, and the owner-only verbs never come through here at all.
+
+        :param run: The run about to park.
+        :param question: What a person reads.
+        :param options: The choices.
+        :param evidence: What they should see first.
+        :param now: Epoch seconds.
+        :returns: The request, or ``None`` when no ledger is configured.
+        """
+        if self.approvals is None or run.bot_id is None:
+            return None
+        request = self.approvals.request(
+            bot_id=run.bot_id,
+            run_id=run.id,
+            # The version the run will be *parked at*, not the one it is
+            # leaving. The move into WAITING_HUMAN is a compare-and-swap on the
+            # version read here, so it lands at exactly one more — and while the
+            # run waits, nothing moves it further. Binding the pre-move version
+            # instead makes every verdict look stale the moment it is asked.
+            run_version=run.version + 1,
+            verb=ITERATION_GATE,
+            # The hash covers the iteration's evidence, so an answer given to
+            # one set of findings cannot be applied to a different set.
+            parameters={"run": run.id, "evidence": evidence},
+            question=question,
+            options=list(options),
+            evidence=evidence,
+            thread_id=run.id,
             now=now,
         )
+        if self.messages is not None:
+            self.messages.post(
+                run.bot_id,
+                "system",
+                MessageKind.ASK,
+                question,
+                now=now,
+                payload={
+                    "approval_id": request.id,
+                    "options": list(options),
+                    "evidence": evidence,
+                },
+                thread_id=run.id,
+                run_id=run.id,
+                # Owed to a person, so it shows up in "what needs you" until
+                # somebody actually answers it.
+                deliver_to=["human:owner"],
+            )
+        return request
 
     # ── succession ────────────────────────────────────────────────
 
@@ -486,16 +582,161 @@ class BotSupervisor(Supervisor):
         reason = str(run.artifacts.get("rate_limited_phrase") or "vendor reported a limit")
         self.bots.block_vendor(harness, now + seconds, reason)
 
+    # ── the authorisation path ────────────────────────────────────
+
+    def _command_from_chat_reply(self, run: Run, *, now: int) -> Command | None:
+        """
+        Refuse to turn typed prose into an authorisation.
+
+        The base class reads the session transcript and converts a reply that
+        names one offered option into an ``APPROVE`` command. That is a genuine
+        convenience — it is the phone answer path — and it is also a second
+        authorisation route that consults none of the bindings an approval is
+        supposed to carry. A binding one answer path ignores is not a binding,
+        so for a bot there is exactly one route to a verdict and it goes
+        through :class:`~army.bots.approvals.ApprovalStore`.
+
+        The reply is not lost. It lands in the bot's channel as an ordinary
+        message, where a person can see what was said and answer properly.
+
+        :param run: The run parked on a person.
+        :param now: Epoch seconds.
+        :returns: Always ``None``.
+        """
+        if self.approvals is None:
+            # No ledger configured, so there is no bound path to insist on and
+            # the base class's behaviour is the only one available.
+            return super()._command_from_chat_reply(run, now=now)
+        self._capture_chat_reply(run, now=now)
+        return None
+
+    def _capture_chat_reply(self, run: Run, *, now: int) -> None:
+        """
+        Copy anything said in the session into the bot's channel.
+
+        So that refusing to treat prose as authorisation does not also throw
+        the prose away — a person who typed "looks fine, merge it" said
+        something worth keeping next to the question.
+
+        :param run: The run parked on a person.
+        :param now: Epoch seconds.
+        """
+        if self.messages is None or run.bot_id is None:
+            return
+        session_id = _asking_session(run)
+        if session_id is None:
+            return
+        try:
+            replies = self.omni.replies_after(session_id, barrier_marker(run.id))
+        except Exception:  # noqa: BLE001 — a convenience must never cost an iteration
+            # The question is already answerable from the CLI; this only mirrors
+            # chatter into the channel, so a failure here is a non-event.
+            _logger.debug("could not read replies for run %s", run.id[:12], exc_info=True)
+            return
+        seen = {
+            message.payload.get("reply")
+            for message in self.messages.thread(run.bot_id, run.id)
+            if message.kind is MessageKind.HUMAN_MSG
+        }
+        for reply in replies:
+            if reply in seen:
+                continue
+            self.messages.post(
+                run.bot_id,
+                "human:session",
+                MessageKind.HUMAN_MSG,
+                reply,
+                now=now,
+                payload={"reply": reply, "authorises": False},
+                thread_id=run.id,
+                run_id=run.id,
+            )
+
+    # ── mail and expiry ───────────────────────────────────────────
+
+    def _deliver_mail(self, *, now: int) -> None:
+        """
+        Make event-driven bots with unread mail due.
+
+        This is the insert half of the wake model. An ``on_message`` bot has no
+        ``next_due_at`` at all — nothing is scheduling it, so time passing must
+        never wake it — and a message arriving is the only thing that should.
+
+        One query for the whole fleet, not one per bot: asking per bot is what
+        turns a forty-bot roster slow exactly when it is busy.
+
+        :param now: Epoch seconds.
+        """
+        if self.messages is None:
+            return
+        waiting = self.messages.waiting_recipients(now=now)
+        if not waiting:
+            return
+        for bot in self.bots.list(status=BotStatus.ACTIVE):
+            if bot.next_due_at is not None or not is_event_driven(bot):
+                # Already scheduled, or driven by a clock. Pulling a scheduled
+                # bot forward on every message is how two bots that talk to each
+                # other spin without a human ever being involved.
+                continue
+            if bot.address not in waiting:
+                continue
+            _logger.info(
+                "bot %s has %d message(s) waiting; waking it", bot.slug, waiting[bot.address]
+            )
+            with suppress(ConcurrentTransition):
+                wake_now(self.bots, bot, now=now, reason="event")
+
+    def _expire_approvals(self, *, now: int) -> None:
+        """
+        Close out questions nobody answered, and pause the bots waiting on them.
+
+        Expiry is never an approval — the hard gates forbid it, and a system
+        that approves on silence makes a holiday into a blanket authorisation.
+        The bot stops and says so, which is the failure mode a person can see.
+
+        :param now: Epoch seconds.
+        """
+        if self.approvals is None:
+            return
+        for request in self.approvals.expire_due(now=now):
+            _logger.warning(
+                "approval %s for bot %s expired unanswered after %ds; pausing the bot",
+                request.id[:12],
+                request.bot_id,
+                now - request.created_at,
+            )
+            if self.messages is not None:
+                self.messages.post(
+                    request.bot_id,
+                    "system",
+                    MessageKind.EVENT,
+                    f"Question expired unanswered: {request.question}",
+                    now=now,
+                    payload={"approval_id": request.id, "outcome": "expired"},
+                    thread_id=request.thread_id,
+                    run_id=request.run_id,
+                )
+            bot = self.bots.get(request.bot_id)
+            if bot is not None and bot.status is BotStatus.ACTIVE:
+                self._pause(bot, now=now)
+
     # ── operator view ─────────────────────────────────────────────
 
     def fleet_tick(self, *, now: int | None = None) -> TickReport:
         """
-        One pass, plus the alarm for bots nothing will ever wake.
+        One full pass: mail, expiry, the run loop, and the alarm.
+
+        Order matters. Mail is delivered *before* the scan, so a bot woken by a
+        message is due in the same tick rather than the next one; expiry runs
+        before it too, so a bot whose question timed out is paused rather than
+        dispatched again with the question still open.
 
         :param now: Epoch seconds; defaults to the clock.
         :returns: What the pass did.
         """
         stamp = int(time.time()) if now is None else now
+        self._deliver_mail(now=stamp)
+        self._expire_approvals(now=stamp)
         report = self.tick(now=stamp)
         for bot in self.bots.stalled(now=stamp):
             # A lost succession is otherwise invisible: the bot is active, has
