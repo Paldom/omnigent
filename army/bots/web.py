@@ -507,6 +507,83 @@ class BotsSite:
         )
         return f"Recorded {command.kind.value}; the loop applies it on its next tick.", ""
 
+    def bot_json(self, slug: str, *, now: int) -> str | None:
+        """
+        One bot as JSON: definition, ledger, channel, and its open question.
+
+        Everything the middle column and the dock of the Bots section need, in
+        one round trip — a page that fetched them separately would show a
+        roster and a channel from two different moments.
+
+        :param slug: The bot's addressable name.
+        :param now: Epoch seconds.
+        :returns: A JSON document, or ``None`` when there is no such bot.
+        """
+        bot = self.bots.by_slug(slug)
+        if bot is None:
+            return None
+        entry = next((row for row in roster(self.bots, now=now) if row.bot.id == bot.id), None)
+        pending = self.approvals.pending(bot_id=bot.id)
+        return json.dumps(
+            {
+                "slug": bot.slug,
+                "display_name": bot.display_name,
+                "title": bot.title,
+                "mission": bot.mission,
+                "persona": bot.persona,
+                "workload": bot.workload,
+                "harness": bot.harness,
+                "wake": bot.wake.to_dict(),
+                "status": entry.status.value if entry else "unknown",
+                "due_in": entry.due_in(now) if entry else None,
+                "idle_streak": bot.idle_streak,
+                "error_streak": bot.error_streak,
+                "paused_reason": bot.paused_reason,
+                "workspace": bot.workspace,
+                "browser_profile": bot.browser_profile,
+                "revision": bot.current_revision_id,
+                "runs": [
+                    {
+                        "id": run["id"],
+                        "state": run["state"],
+                        "outcome": run["outcome"],
+                        "reason": run["terminal_reason"],
+                        "at": run["updated_at"],
+                    }
+                    for run in self.bots.runs_for(bot.id, limit=12)
+                ],
+                "channel": [
+                    {
+                        "seq": message.seq,
+                        "kind": message.kind.value,
+                        "author": message.author,
+                        "body": message.body,
+                        "at": message.created_at,
+                        "thread": message.thread_id,
+                    }
+                    for message in self.messages.channel(bot.id, limit=60)
+                ],
+                "pending": [
+                    {
+                        "id": request.id,
+                        "question": request.question,
+                        "options": request.options,
+                        "evidence": request.evidence,
+                        "verb": request.verb,
+                        "action_hash": request.action_hash,
+                        "policy_version": request.policy_version,
+                        "run_id": request.run_id,
+                        "run_version": request.run_version,
+                        "requires_owner": request.requires_owner,
+                        "expires_at": request.expires_at,
+                        "created_at": request.created_at,
+                    }
+                    for request in pending
+                ],
+            },
+            indent=2,
+        )
+
     def api(self, *, now: int) -> str:
         """
         The roster as JSON, for anything that is not a browser.
@@ -531,6 +608,12 @@ class BotsSite:
                         ),
                         "paused_reason": entry.bot.paused_reason,
                         "run_id": entry.live_run_id,
+                        "title": entry.bot.title,
+                        "mission": entry.bot.mission,
+                        "harness": entry.bot.harness,
+                        "needs_human": entry.needs_a_human,
+                        "blocked_until": entry.blocked_until,
+                        "wake_kind": entry.bot.wake.kind.value,
                     }
                     for entry in entries
                 ],
@@ -571,6 +654,12 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if route.path == "/api/bots":
             self._send(200, self.site.api(now=now), "application/json")
+        elif route.path.startswith("/api/bots/"):
+            payload = self.site.bot_json(route.path.removeprefix("/api/bots/"), now=now)
+            if payload is None:
+                self._send(404, '{"error":"no such bot"}', "application/json")
+            else:
+                self._send(200, payload, "application/json")
         elif route.path == "/proposals":
             self._send(200, self.site.proposals(now=now), "text/html; charset=utf-8")
         elif route.path.startswith("/bots/"):

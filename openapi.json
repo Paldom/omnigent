@@ -7646,6 +7646,99 @@
         ]
       }
     },
+    "/v1/bots": {
+      "get": {
+        "description": "The fleet and everything waiting on a person.",
+        "operationId": "list_bots_v1_bots_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Bots V1 Bots Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Bots",
+        "tags": [
+          "bots"
+        ]
+      }
+    },
+    "/v1/bots/verdict": {
+      "post": {
+        "description": "Answer a question, through the control plane's own bound path.\n\nDeliberately a forward rather than a reimplementation. The bindings \u2014\naction hash, policy version, run version \u2014 are checked once, in the\nplace that owns them, so this page cannot become a softer route to a\nverdict than the CLI.",
+        "operationId": "answer_v1_bots_verdict_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Answer V1 Bots Verdict Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Answer",
+        "tags": [
+          "bots"
+        ]
+      }
+    },
+    "/v1/bots/{slug}": {
+      "get": {
+        "description": "One bot's definition, ledger, channel and open question.",
+        "operationId": "one_bot_v1_bots__slug__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response One Bot V1 Bots  Slug  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "One Bot",
+        "tags": [
+          "bots"
+        ]
+      }
+    },
     "/v1/branding/logo/{variant}": {
       "get": {
         "description": "Serve a validated public branding asset, or 404 when unset.",

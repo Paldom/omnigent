@@ -28,6 +28,7 @@ import {
   FolderMinusIcon,
   FolderOpenIcon,
   GitBranchIcon,
+  BotIcon,
   InboxIcon,
   ListChecksIcon,
   ListFilterIcon,
@@ -142,6 +143,7 @@ import { SessionStateBadge } from "@/components/SessionStateBadge";
 import { useSessionRunnerOnline } from "@/hooks/RunnerHealthProvider";
 import { useActiveRootSessionId } from "@/hooks/useSession";
 import { useCommentInbox } from "@/hooks/useCommentInbox";
+import { useBotsNeedingYou } from "@/hooks/useBots";
 import { sumPendingApprovals } from "@/lib/inbox";
 import { isSessionStoppable } from "@/lib/sessionStop";
 import { getCurrentUserId, resolveIdentity } from "@/lib/identity";
@@ -303,6 +305,7 @@ function useActiveNavItem(): {
   isInboxPage: boolean;
   isTasksPage: boolean;
   isUsagePage: boolean;
+  isBotsPage: boolean;
   newSessionProjectName: string | null;
 } {
   const { conversationId: activeConversationId } = useParams<{ conversationId: string }>();
@@ -311,8 +314,9 @@ function useActiveNavItem(): {
   const isInboxPage = leaf === "inbox";
   const isTasksPage = leaf === "tasks";
   const isUsagePage = leaf === "usage";
+  const isBotsPage = leaf === "bots";
   const isNewSessionRoute =
-    activeConversationId == null && !isInboxPage && !isTasksPage && !isUsagePage;
+    activeConversationId == null && !isInboxPage && !isTasksPage && !isUsagePage && !isBotsPage;
   const requestedProject = isNewSessionRoute
     ? new URLSearchParams(location.search).get("project")
     : null;
@@ -321,7 +325,14 @@ function useActiveNavItem(): {
   // would otherwise light up the "New session" button. A project-prefilled
   // new session belongs to that project row instead of the global nav item.
   const isNewChatPage = isNewSessionRoute && newSessionProjectName == null;
-  return { isNewChatPage, isInboxPage, isTasksPage, isUsagePage, newSessionProjectName };
+  return {
+    isNewChatPage,
+    isInboxPage,
+    isTasksPage,
+    isUsagePage,
+    isBotsPage,
+    newSessionProjectName,
+  };
 }
 
 /**
@@ -582,6 +593,9 @@ export function Sidebar({
   // page lists. Comment queries are shared with the page/FileViewer
   // (same ["comments", id] keys), so this adds no duplicate fetches.
   const unseenComments = useCommentInbox(loadedRows).items.length;
+  // What needs a person, not how many bots exist — a fleet size is not a
+  // to-do list, and a badge that never reaches zero stops being read.
+  const botsNeedingYou = useBotsNeedingYou();
   const inboxCount = pendingApprovals + unseenComments;
 
   // Click handler for conversation-row Links in the sidebar. The Link
@@ -597,8 +611,14 @@ export function Sidebar({
   }
 
   // Which top-level nav button to highlight for the current route.
-  const { isNewChatPage, isInboxPage, isTasksPage, isUsagePage, newSessionProjectName } =
-    useActiveNavItem();
+  const {
+    isNewChatPage,
+    isInboxPage,
+    isTasksPage,
+    isUsagePage,
+    isBotsPage,
+    newSessionProjectName,
+  } = useActiveNavItem();
 
   // On /settings the card keeps its chrome but swaps the conversation list
   // for the settings section nav (see settingsNav.tsx) — entering settings
@@ -934,6 +954,48 @@ export function Sidebar({
                     )}
                   >
                     {inboxCount}
+                  </span>
+                )}
+              </Link>
+            </Button>
+            {/* Last in the primary group, after Inbox — the order in
+                plan-2/ui-mock/bots.html. The badge counts what needs a person,
+                not how many bots exist: a fleet size is not a to-do list, and a
+                badge that never reaches zero stops being read. */}
+            <Button
+              asChild
+              className={cn(
+                SIDEBAR_ROW,
+                "w-full justify-start border-0 font-normal",
+                SIDEBAR_HOVER_HIGHLIGHT,
+                isBotsPage && SIDEBAR_ACTIVE_HIGHLIGHT,
+              )}
+              variant="ghost"
+              data-testid="bots-nav"
+            >
+              <Link to="/bots" onClick={onNavClick}>
+                <BotIcon
+                  className={cn(
+                    "ui-icon",
+                    isBotsPage
+                      ? "text-[var(--sidebar-active-foreground)]"
+                      : "text-muted-foreground",
+                  )}
+                />
+                Bots
+                {botsNeedingYou > 0 && (
+                  <span
+                    aria-label={
+                      botsNeedingYou === 1
+                        ? "1 bot waiting on you"
+                        : `${botsNeedingYou} bots waiting on you`
+                    }
+                    className={cn(
+                      "ml-auto inline-flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-10 font-medium text-[var(--sidebar-active-foreground)] tabular-nums",
+                      isBotsPage ? "bg-transparent" : "bg-[var(--sidebar-active)]",
+                    )}
+                  >
+                    {botsNeedingYou}
                   </span>
                 )}
               </Link>

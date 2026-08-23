@@ -61,6 +61,7 @@ from omnigent.server.performance_metrics import (
     set_request_session_id_for_access_log,
     set_request_user_agent_for_access_log,
 )
+from omnigent.server.routes.bots import create_bots_router
 from omnigent.server.routes.builtin_agents import create_builtin_agents_router
 from omnigent.server.routes.comments import create_comments_router
 from omnigent.server.routes.default_policies import create_default_policies_router
@@ -2265,6 +2266,15 @@ def create_app(
         create_harnesses_router(auth_provider=auth_provider),
         prefix="/v1",
         tags=["harnesses"],
+    )
+    # Bot mode's roster and approvals, forwarded to the army control plane on
+    # loopback. Registered unconditionally: with Bot mode absent the routes
+    # answer "not running", which the page renders as a sentence rather than
+    # an error.
+    app.include_router(
+        create_bots_router(auth_provider=auth_provider),
+        prefix="/v1",
+        tags=["bots"],
     )
     # Server-side speech-to-text behind the composer mic button
     # (designs/server-dictation.md). Availability is probed lazily, so

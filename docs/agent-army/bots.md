@@ -215,20 +215,45 @@ Mac would be protocol for protocol's sake.
 
 ---
 
-## The page
+## The UI
+
+There are two surfaces onto the same rows, and no third state machine behind
+either — both read the control plane, and a verdict goes through one bound path
+whichever one you clicked.
+
+### In the app — **Bots** in the sidebar
+
+```bash
+army bots run &        # the loop, which is also what serves the API
+omnigent serve         # the app, as usual
+```
+
+Then **Bots** in the main navigation, at `/bots`. Three columns, following
+`plan-2/ui-mock/bots.html`: a roster that leads with **Needs you**, the selected
+bot's channel with pending approvals pinned above the stream, and a dock over
+Files / Runs / Setup. The nav row carries a count of bots waiting on a person —
+the reason to integrate at all, since a badge is how you learn about one while
+doing something else.
+
+`omnigent/server/routes/bots.py` **forwards** to the control plane on loopback.
+It imports nothing from `army`, holds the token server-side so the browser never
+sees it, and answers `{"running": false}` with a sentence when the loop is down —
+which the page renders as prose, because "not started" is a normal state for a
+machine nobody has set up yet.
+
+### Standalone — `army bots serve`
 
 ```bash
 army bots serve --host 100.x.y.z    # your tailnet address
 ```
 
-A roster and an approval surface, served by the control-plane process. No
+The same roster and approval surface from the control-plane process itself. No
 framework, no build step, no new dependency — `http.server` and a string, with
 the design tokens read out of Omnigent's own `index.css`.
 
-It is **not** a section in the Omnigent web app, on purpose. Upstream hard-codes
-its routes and its navigation, so an integrated page would mean carried patches
-in files that change weekly, in a repository that lands about a hundred issues a
-week. This costs zero upstream files, forever.
+Worth keeping even now the app has a section: it needs no Omnigent server, it is
+what the proxy above talks to, and it opens on a phone over the tailnet — which
+is the whole reason the approval path had to be answerable from one.
 
 **Every request carries a token**, minted on first run into
 `~/.omnigent/army/web-token` (mode 0600) and printed with the link. That

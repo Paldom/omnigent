@@ -59,7 +59,7 @@ absence.** Where something is not built, it is refused rather than faked.
 
 | | |
 |---|---|
-| BOT-21 | `army bots serve`, plus the CLI. Served by the control plane, so no upstream patch. |
+| BOT-21 | **Bots** in the app's main navigation (`/bots`), with a count of what is waiting on you; `army bots serve` for the phone; the CLI for everything. Three carried patches, all list entries — see `FORK-DELTA.md`. |
 | BOT-22 | The YAML format, versioned, refusing rather than defaulting. |
 | BOT-23 | Reports cite the run that produced them and land in the bot's docs repo. |
 
@@ -143,9 +143,11 @@ profile directory.
 - **Bots on one vendor share that vendor's own memory** (`~/.claude`,
   `~/.codex`), so working memory bleeds between them even though Omnigent
   sessions do not.
-- **The page has no authentication.** The answer is the tailnet. Owner-only
-  verbs still need a signed grant, so the blast radius of a second person on
-  that tailnet is "can answer ordinary iteration gates".
+- **The standalone page has no per-person authentication** — one shared token,
+  and the tailnet. (The in-app section is behind Omnigent's own auth, which is
+  why the proxy calls `require_user` before it forwards anything.) Owner-only
+  verbs still need a signed grant either way, so the blast radius of a second
+  person on that tailnet is "can answer ordinary iteration gates".
 - **`runs` has no retention policy.** One row per iteration, indexed by bot, but
   nothing prunes it. Fine for months; not forever.
 - **rrule times are UTC.** `BYHOUR=9` means 09:00 UTC, which is not what an
