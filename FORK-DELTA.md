@@ -26,6 +26,9 @@ rebase and are not counted as delta:
 | Addition | What it is |
 |---|---|
 | `army/` | The durable workflow control plane. Deliberately *over* Omnigent's session API rather than inside it, so exactly one component owns durable workflow state and upstream's own direction is not fought. |
+| `army/bots/` | Bot mode: long-running, mission-driven bots over that loop. Imports `army`, and nothing in `army` imports it — `tests/army/bots/test_boundary.py` parses the core modules to enforce that, so deleting the directory leaves a working `army`. The one crossing is a lazy import inside `army/cli.py`'s `bots` subcommand. |
+| `docs/agent-army/bots.md` | How to run it. |
+| `tests/army/bots/` | Durability, scheduling, delivery and capability tests for the above. |
 | `agents/marshal/` | The orchestrator and its six-vendor roster. Agent YAML only — no code, so nothing here can break on a rebase. |
 | `docs/agent-army/` | Setup and operation. |
 | `tests/army/` | Durability and bypass tests for the above. |
@@ -45,3 +48,22 @@ rebase and are not counted as delta:
   tells you which rows above upstream has since merged. Run it often — upstream
   lands roughly a hundred issues a week, so a fork that syncs monthly conflicts
   monthly.
+
+## Why Bot mode has no UI patch
+
+The obvious home for a bot roster is a section in the Omnigent web app, and it
+was deliberately not built there. Upstream hard-codes its routes in
+`web/src/App.tsx` and its navigation in the shell, so an integrated page is a
+carried patch in two files that change weekly — forever, for as long as the
+feature exists.
+
+`army bots serve` renders the same surface from the control plane's own process
+instead: one page, `http.server`, no build step, design tokens read out of
+`web/src/index.css` so it looks like the product. The deployment is already one
+always-on box reached over Tailscale, so a second port on that box is the same
+journey for the operator, and it opens on a phone — which is the whole reason
+the approval path had to be answerable from one.
+
+The cost is real and worth naming: it is a separate page rather than a tab, and
+it does not inherit the app's session or its keyboard shortcuts. The benefit is
+that this row will never appear in the table above.

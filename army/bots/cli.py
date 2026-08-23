@@ -27,6 +27,7 @@ from army.bots.roster import RosterEntry, roster, summarise
 from army.bots.schedule import first_wake
 from army.bots.store import BotStore
 from army.bots.supervisor import BotSupervisor, wake_now
+from army.bots.web import BotsSite, serve
 from army.config import Config
 from army.gates import GateRefused, Grant
 from army.lanes import Lanes
@@ -436,6 +437,26 @@ def cmd_run(config: Config, args: argparse.Namespace) -> int:
             return 0
 
 
+def cmd_serve(config: Config, args: argparse.Namespace) -> int:
+    """
+    Serve the Bots page from this process.
+
+    :param config: Resolved configuration.
+    :param args: Uses ``--host`` and ``--port``.
+    :returns: Process exit code.
+    """
+    store = Store(config.state_path)
+    bots = BotStore(store)
+    site = BotsSite(store, bots, ApprovalStore(bots, owner_broker(bots)), MessageStore(bots))
+    server = serve(site, host=args.host, port=args.port)
+    print(f"bots page on http://{args.host}:{args.port}/bots  (ctrl-c to stop)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.shutdown()
+    return 0
+
+
 def cmd_example(_config: Config, _args: argparse.Namespace) -> int:
     """Print a definition that works without a vendor configured."""
     print(EXAMPLE, end="")
@@ -580,6 +601,15 @@ def add_parser(sub: argparse._SubParsersAction, common: argparse.ArgumentParser)
             "add_dependency — a channel verdict alone never satisfies those",
         )
         verdict.set_defaults(func=cmd_verdict)
+
+    site = inner.add_parser("serve", help="serve the Bots page", parents=[common])
+    site.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="address to bind; use the tailnet address to reach it from a phone",
+    )
+    site.add_argument("--port", type=int, default=6768)
+    site.set_defaults(func=cmd_serve)
 
     channel = inner.add_parser("channel", help="read a bot's channel", parents=[common])
     channel.add_argument("bot", help="slug or id prefix")
