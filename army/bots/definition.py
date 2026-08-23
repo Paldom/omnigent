@@ -41,6 +41,20 @@ _SLUG = re.compile(r"^[a-z][a-z0-9-]{1,30}[a-z0-9]$")
 #: these four do not, because a bot without them is not a bot.
 REQUIRED = ("slug", "persona", "mission", "workload")
 
+#: Fields that decide *where* a bot may act, and which a bot-authored
+#: definition may therefore not set. Each one is a capability wearing the
+#: clothes of configuration:
+#:
+#: - ``workspace`` becomes the sandbox's only writable path, so ``/`` is a
+#:   filesystem;
+#: - ``browser_profile`` is a cookie jar, so naming another bot's is taking its
+#:   logged-in sessions;
+#: - ``docs_ref`` is where reports are pushed.
+#:
+#: A person writing YAML may set all three — they already have the filesystem.
+#: A bot proposing a child may not, and they are derived from its slug instead.
+DERIVED_FOR_SPAWNED = ("workspace", "browser_profile", "docs_ref")
+
 
 class InvalidDefinition(ValueError):
     """Raised when a definition cannot be turned into a bot.
@@ -125,6 +139,10 @@ def to_bot(
     if not isinstance(workload_config, dict):
         raise InvalidDefinition("'workload_config' must be a mapping")
 
+    if parent is not None:
+        _refuse_privileged_fields(spec, slug=slug, parent=parent)
+        workload_config = _inherited_config(workload_config, parent, slug=slug)
+
     return Bot.new(
         slug,
         display_name=str(spec.get("display_name") or slug),
@@ -136,15 +154,72 @@ def to_bot(
         now=now,
         title=_optional_text(spec, "title"),
         workload_config=workload_config,
-        harness=_optional_text(spec, "harness"),
-        workspace=_optional_text(spec, "workspace"),
-        browser_profile=_optional_text(spec, "browser_profile") or f"persist:bot-{slug}",
-        docs_ref=_optional_text(spec, "docs_ref"),
+        # A child runs on its parent's vendor. Letting it pick another lane
+        # would let a bot whose lane is cooling spawn its way onto a fresh one.
+        harness=parent.harness if parent is not None else _optional_text(spec, "harness"),
+        workspace=None if parent is not None else _optional_text(spec, "workspace"),
+        browser_profile=(
+            f"persist:bot-{slug}"
+            if parent is not None
+            else (_optional_text(spec, "browser_profile") or f"persist:bot-{slug}")
+        ),
+        docs_ref=None if parent is not None else _optional_text(spec, "docs_ref"),
         expires_at=_expiry(spec, now=now),
         parent_bot_id=parent.id if parent else None,
         root_bot_id=(parent.root_bot_id or parent.id) if parent else None,
         depth=depth,
     )
+
+
+def _refuse_privileged_fields(spec: dict[str, Any], *, slug: str, parent: Bot) -> None:
+    """
+    Refuse a bot-authored definition that names where it may act.
+
+    Loudly, rather than by silently dropping the field. A bot that tried is
+    doing something worth an operator seeing — and one that merely copied a
+    template needs to be told why it was rejected.
+
+    :param spec: The proposed definition.
+    :param slug: The proposed name, for the message.
+    :param parent: The proposing bot.
+    :raises InvalidDefinition: If any privileged field is present.
+    """
+    named = [field for field in DERIVED_FOR_SPAWNED if spec.get(field)]
+    if named:
+        raise InvalidDefinition(
+            f"{parent.slug} proposed {slug!r} with {', '.join(named)} set. "
+            "Those decide where a bot may write and whose logged-in sessions it "
+            "uses, so a bot may not choose them for its child — they are derived "
+            "from the slug. Remove them."
+        )
+
+
+def _inherited_config(
+    proposed: dict[str, Any], parent: Bot, *, slug: str
+) -> dict[str, Any]:
+    """
+    Let a child be configured only where its parent already is.
+
+    ``workload_config`` reaches a workload's constructor as keyword arguments,
+    so an unconstrained one is an arbitrary call into operator code — a queue
+    path pointed at ``~/.ssh/authorized_keys``, say. A bot cannot hand its child
+    a key it does not itself hold.
+
+    :param proposed: What the parent asked for.
+    :param parent: The proposing bot.
+    :param slug: The proposed name, for the message.
+    :returns: The config, restricted to keys the parent already has.
+    :raises InvalidDefinition: If it asks for a key the parent does not have.
+    """
+    unknown = sorted(set(proposed) - set(parent.workload_config))
+    if unknown:
+        raise InvalidDefinition(
+            f"{parent.slug} proposed {slug!r} with workload_config keys it does not "
+            f"itself have: {', '.join(unknown)}. Those become constructor arguments, "
+            "so a bot may only pass on configuration it was given. Ask a person to "
+            "write this one."
+        )
+    return dict(proposed)
 
 
 def _wake_policy(spec: dict[str, Any]) -> WakePolicy:

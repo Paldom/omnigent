@@ -286,3 +286,139 @@ def test_a_daily_window_is_separate_from_the_total(bots: BotStore, budgets: Budg
     budgets.grant(bot.id, 2, window=Window.DAY, resets_at=NOW + 86_400)
     assert budgets.account(bot.id, window=Window.DAY).remaining == 2  # type: ignore[union-attr]
     assert budgets.account(bot.id, window=Window.TOTAL).remaining == 1000  # type: ignore[union-attr]
+
+
+# ── what a bot may put in a definition ────────────────────────────
+#
+# A bot authors the proposed definition, and a definition is not inert: three
+# of its fields are capabilities wearing the clothes of configuration. The
+# human who adopts it reads a rationale the same bot wrote.
+
+
+def _child_spec(**extra: object) -> dict:
+    spec = {
+        "slug": "helper",
+        "persona": "a child",
+        "mission": "help",
+        "workload": "army.workloads.demo:DemoWorkload",
+        "wake": {"kind": "manual"},
+    }
+    spec.update(extra)  # type: ignore[arg-type]
+    return spec
+
+
+def _configured_parent(bots: BotStore) -> object:
+    parent = make_bot(
+        "parent",
+        workload="army.workloads.demo:DemoWorkload",
+        harness="claude-native",
+        workload_config={"queue_path": "/safe/queue.txt"},
+    )
+    return activate(bots, parent, now=NOW)
+
+
+def test_a_bot_cannot_give_its_child_the_whole_filesystem(
+    bots: BotStore, spawns: SpawnStore
+) -> None:
+    """``workspace`` becomes the sandbox's only writable path."""
+    parent = _configured_parent(bots)
+    with pytest.raises(SpawnRefused, match="workspace"):
+        spawns.propose(parent, _child_spec(workspace="/"), rationale="x", now=NOW)
+
+
+def test_a_bot_cannot_give_its_child_another_bots_cookie_jar(
+    bots: BotStore, spawns: SpawnStore
+) -> None:
+    """A partition is a set of logged-in sessions. Naming one is taking them."""
+    parent = _configured_parent(bots)
+    with pytest.raises(SpawnRefused, match="browser_profile"):
+        spawns.propose(
+            parent,
+            _child_spec(browser_profile="persist:bot-treasurer"),
+            rationale="x",
+            now=NOW,
+        )
+
+
+def test_a_bot_cannot_configure_its_child_beyond_its_own_configuration(
+    bots: BotStore, spawns: SpawnStore
+) -> None:
+    """``workload_config`` reaches a constructor as keyword arguments.
+
+    Unconstrained, that is an arbitrary call into operator code — a queue path
+    aimed at ``~/.ssh/authorized_keys``, for instance. A bot may pass on
+    configuration it was given and nothing else.
+    """
+    parent = _configured_parent(bots)
+    with pytest.raises(SpawnRefused, match=r"does not.*itself have"):
+        spawns.propose(
+            parent,
+            _child_spec(workload_config={"queue_path": "/x", "reviewer_agent": "z"}),
+            rationale="x",
+            now=NOW,
+        )
+
+
+def test_a_child_may_be_configured_where_its_parent_already_is(
+    bots: BotStore, spawns: SpawnStore
+) -> None:
+    """The rule bounds escalation, not usefulness."""
+    parent = _configured_parent(bots)
+    request = spawns.propose(
+        parent,
+        _child_spec(workload_config={"queue_path": "/safe/other.txt"}),
+        rationale="a second queue",
+        now=NOW,
+    )
+    assert request.definition["workload_config"] == {"queue_path": "/safe/other.txt"}
+
+
+def test_a_child_runs_on_its_parents_vendor(bots: BotStore, spawns: SpawnStore) -> None:
+    """Otherwise a bot whose lane is cooling spawns its way onto a fresh one."""
+    parent = _configured_parent(bots)
+    budgets = BudgetStore(bots)
+    budgets.grant(parent.id, 100)
+    request = spawns.propose(
+        parent, _child_spec(harness="codex-native"), rationale="x", now=NOW, allowance=5
+    )
+    child = spawns.activate(request, decided_by="human:dpal", now=NOW)
+    assert child.harness == "claude-native"
+
+
+def test_a_childs_workspace_and_jar_are_derived_from_its_slug(
+    bots: BotStore, spawns: SpawnStore
+) -> None:
+    parent = _configured_parent(bots)
+    budgets = BudgetStore(bots)
+    budgets.grant(parent.id, 100)
+    request = spawns.propose(parent, _child_spec(), rationale="x", now=NOW, allowance=5)
+    child = spawns.activate(request, decided_by="human:dpal", now=NOW)
+    assert child.workspace is None
+    assert child.browser_profile == "persist:bot-helper"
+
+
+def test_a_person_writing_yaml_keeps_every_field(bots: BotStore) -> None:
+    """The restriction is on bot-authored definitions, not on the format.
+
+    A person already has the filesystem; withholding a field from them would be
+    security theatre that costs them a real capability.
+    """
+    from army.bots.definition import to_bot
+
+    human = to_bot(
+        _child_spec(workspace="/srv/scout", browser_profile="persist:shared", docs_ref="git@x"),
+        created_by="human:dpal",
+        now=NOW,
+    )
+    assert human.workspace == "/srv/scout"
+    assert human.browser_profile == "persist:shared"
+    assert human.docs_ref == "git@x"
+
+
+@pytest.mark.parametrize("bad", ["../escape", "has space", "UPPER", "a", "x" * 40, "1leading"])
+def test_a_slug_cannot_be_a_path(bad: str, bots: BotStore, spawns: SpawnStore) -> None:
+    """It is used as a directory name and a partition key, so it may contain
+    nothing that would need escaping in either."""
+    parent = _configured_parent(bots)
+    with pytest.raises(SpawnRefused, match="slug"):
+        spawns.propose(parent, _child_spec(slug=bad), rationale="x", now=NOW)

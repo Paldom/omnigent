@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from army.bots.approvals import ApprovalRefused, ApprovalStore, owner_broker
 from army.bots.budget import BudgetExhausted, BudgetStore
 from army.bots.definition import EXAMPLE, InvalidDefinition, load_file, to_bot, to_yaml
@@ -463,6 +465,12 @@ def cmd_proposals(config: Config, _args: argparse.Namespace) -> int:
             f" · {request.allowance} iterations"
         )
         print(f"{'':14}{request.rationale}")
+        # The whole definition, not a summary. A rationale is what the bot
+        # *says* it wants; the definition is what it would actually get, and
+        # approving the first without reading the second is how a plausible
+        # sentence becomes a workload pointed somewhere it should not be.
+        for line in yaml.safe_dump(request.definition, sort_keys=False).splitlines():
+            print(f"{'':14}| {line}")
         print(f"{'':14}army bots adopt {request.id[:12]}   |   army bots refuse {request.id[:12]}")
     return 0
 
@@ -481,6 +489,19 @@ def cmd_adopt(config: Config, args: argparse.Namespace) -> int:
     if request is None:
         print(f"no proposal matching {args.proposal!r}", file=sys.stderr)
         return 1
+    if not args.yes:
+        parent = bots.get(request.parent_bot_id)
+        print(f"{parent.slug if parent else 'a bot'} proposes {request.slug}:")
+        print(f"  {request.rationale}\n")
+        for line in yaml.safe_dump(request.definition, sort_keys=False).splitlines():
+            print(f"  {line}")
+        print(
+            f"\nThis creates a draft bot funded with "
+            f"{args.allowance if args.allowance is not None else request.allowance} "
+            "iterations carved from its parent."
+        )
+        print(f"Re-run with --yes to go ahead: army bots adopt {request.id[:12]} --yes")
+        return 0
     try:
         child = spawns.activate(
             request,
@@ -746,6 +767,11 @@ def add_parser(sub: argparse._SubParsersAction, common: argparse.ArgumentParser)
         "--allowance",
         type=int,
         help="iterations to carve from the parent, overriding what it asked for",
+    )
+    adopt.add_argument(
+        "--yes",
+        action="store_true",
+        help="go ahead; without it the definition is printed for you to read first",
     )
     adopt.set_defaults(func=cmd_adopt)
 

@@ -121,9 +121,7 @@ def test_a_verdict_records_itself_in_the_channel(site: BotsSite, bots: BotStore)
         now=NOW,
     )
     verdicts = [
-        message
-        for message in site.messages.channel(bot.id)
-        if message.kind is MessageKind.VERDICT
+        message for message in site.messages.channel(bot.id) if message.kind is MessageKind.VERDICT
     ]
     assert len(verdicts) == 1
     assert verdicts[0].author == "human:web"
