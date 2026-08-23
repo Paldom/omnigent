@@ -53,7 +53,7 @@ REQUIRED = ("slug", "persona", "mission", "workload")
 #:
 #: A person writing YAML may set all three — they already have the filesystem.
 #: A bot proposing a child may not, and they are derived from its slug instead.
-DERIVED_FOR_SPAWNED = ("workspace", "browser_profile", "docs_ref")
+DERIVED_FOR_SPAWNED = ("workspace", "browser_profile", "docs_ref", "source_agent")
 
 
 class InvalidDefinition(ValueError):
@@ -164,6 +164,10 @@ def to_bot(
             else (_optional_text(spec, "browser_profile") or f"persist:bot-{slug}")
         ),
         docs_ref=None if parent is not None else _optional_text(spec, "docs_ref"),
+        # A bot another bot invented is not an instance of anybody's roster
+        # row. Letting a child claim one would let a spawned bot inherit an
+        # authority the roster never granted it.
+        source_agent=None if parent is not None else _optional_text(spec, "source_agent"),
         expires_at=_expiry(spec, now=now),
         parent_bot_id=parent.id if parent else None,
         root_bot_id=(parent.root_bot_id or parent.id) if parent else None,
@@ -308,6 +312,7 @@ def to_yaml(bot: Bot) -> str:
         ("workspace", bot.workspace),
         ("browser_profile", bot.browser_profile),
         ("docs_ref", bot.docs_ref),
+        ("source_agent", bot.source_agent),
         ("expires_at", bot.expires_at),
     ):
         if value:

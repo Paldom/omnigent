@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS bots (
     workspace           TEXT,
     browser_profile     TEXT,
     docs_ref            TEXT,
+    source_agent        TEXT,
     version             INTEGER NOT NULL DEFAULT 0,
     created_at          INTEGER NOT NULL,
     updated_at          INTEGER NOT NULL
@@ -98,7 +99,10 @@ CREATE TABLE IF NOT EXISTS provider_gates (
 #: Columns added to ``bots`` after the first release. ``CREATE TABLE IF NOT
 #: EXISTS`` leaves an existing table alone, so a live database needs the same
 #: detect-and-add treatment ``runs`` gets.
-_BOT_COLUMNS: tuple[tuple[str, str], ...] = (("paused_reason", "TEXT"),)
+_BOT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("paused_reason", "TEXT"),
+    ("source_agent", "TEXT"),
+)
 
 #: ``REFERENCES`` clauses are omitted on purpose. ``army/store.py`` opens every
 #: connection without ``PRAGMA foreign_keys=ON``, so they would enforce nothing
@@ -206,7 +210,7 @@ class BotStore:
                     "current_revision_id = ?, slug = ?, display_name = ?, title = ?,"
                     " persona = ?, mission = ?, workload = ?, workload_config = ?,"
                     " harness = ?, wake = ?, workspace = ?, browser_profile = ?,"
-                    " docs_ref = ?, expires_at = ?",
+                    " docs_ref = ?, source_agent = ?, expires_at = ?",
                     (
                         revision.id,
                         bot.slug,
@@ -221,6 +225,7 @@ class BotStore:
                         bot.workspace,
                         bot.browser_profile,
                         bot.docs_ref,
+                        bot.source_agent,
                         bot.expires_at,
                     ),
                     now=now,
@@ -726,9 +731,10 @@ _INSERT_BOT = (
     "INSERT INTO bots (id, slug, display_name, title, persona, mission, workload,"
     " workload_config, harness, wake, status, next_due_at, wake_reason, idle_streak,"
     " error_streak, last_outcome, current_revision_id, parent_bot_id, root_bot_id,"
-    " depth, expires_at, created_by, workspace, browser_profile, docs_ref, version,"
+    " depth, expires_at, created_by, workspace, browser_profile, docs_ref, source_agent,"
+    " version,"
     " created_at, updated_at)"
-    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 
 _INSERT_REVISION = (
@@ -765,6 +771,7 @@ def _bot_params(bot: Bot) -> tuple[Any, ...]:
         bot.workspace,
         bot.browser_profile,
         bot.docs_ref,
+        bot.source_agent,
         bot.version,
         bot.created_at,
         bot.updated_at,
@@ -809,6 +816,7 @@ def _row_to_bot(row: sqlite3.Row) -> Bot:
         expires_at=row["expires_at"],
         created_by=row["created_by"],
         workspace=row["workspace"],
+        source_agent=_optional(row, "source_agent"),
         browser_profile=row["browser_profile"],
         docs_ref=row["docs_ref"],
         paused_reason=_optional(row, "paused_reason"),

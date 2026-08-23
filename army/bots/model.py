@@ -360,6 +360,11 @@ class Bot:
     workspace: str | None = None
     browser_profile: str | None = None
     docs_ref: str | None = None
+    #: The roster row this bot is an instance of, in a system that already has
+    #: one. A host project with its own agent registry does not want a second
+    #: source of truth for who exists — it wants its own row, executed. This
+    #: names that row; the charter stays the host's file and is never copied.
+    source_agent: str | None = None
     paused_reason: str | None = None
     version: int = 0
 
@@ -446,6 +451,7 @@ class Bot:
             "workspace": self.workspace,
             "browser_profile": self.browser_profile,
             "docs_ref": self.docs_ref,
+            "source_agent": self.source_agent,
             "expires_at": self.expires_at,
         }
 
