@@ -233,14 +233,16 @@ class SpawnStore:
         parent = self.bots.get(request.parent_bot_id)
         if parent is None:
             raise SpawnRefused("the bot that proposed this no longer exists")
-        # Re-checked at activation, not just at proposal: the fleet has moved
-        # since, and the cap that mattered is the one in force now.
-        self._check_caps(parent)
 
         child = to_bot(request.definition, created_by=parent.address, now=now, parent=parent)
         share = request.allowance if allowance is None else allowance
 
         with self.store.atomic() as conn:
+            # Inside the transaction, not before it. Checking outside let two
+            # different proposals for the same parent both see two children and
+            # both create one, giving four — the CAS on the proposal only stops
+            # the *same* proposal being activated twice.
+            self._check_caps(parent, conn=conn)
             # Claim the proposal *first*, as a compare-and-swap on its state.
             # The check above read an in-memory object that may be minutes old,
             # so two people clicking approve would otherwise both get past it
@@ -333,11 +335,14 @@ class SpawnStore:
                 row = rows[0]
         return _row_to_request(row)
 
-    def _check_caps(self, parent: Bot) -> None:
+    def _check_caps(self, parent: Bot, *, conn: sqlite3.Connection | None = None) -> None:
         """
         Refuse a proposal that no cap would let through.
 
         :param parent: The proposing bot.
+        :param conn: Join an open transaction. Required when called from inside
+            one — every read here would otherwise open a second connection and
+            wait out the busy timeout against the caller's own lock.
         :raises SpawnRefused: Naming the cap, so the answer is actionable.
         """
         if parent.depth >= MAX_DEPTH:
@@ -347,7 +352,7 @@ class SpawnStore:
             )
         children = [
             child
-            for child in self.bots.children(parent.id)
+            for child in self.bots.children(parent.id, conn=conn)
             if child.status is not BotStatus.RETIRED
         ]
         if len(children) >= MAX_FANOUT:
@@ -356,11 +361,14 @@ class SpawnStore:
                 f"({', '.join(c.slug for c in children)}); the cap is {MAX_FANOUT}. "
                 "Retire one before proposing another."
             )
-        active = len(self.bots.list(status=BotStatus.ACTIVE))
-        if active >= MAX_ACTIVE_BOTS:
+        # Non-retired, not merely active. Counting only ACTIVE made drafts free,
+        # so a parent could stack up proposals and the cap only bit at the very
+        # last switch-on — by which point a person has approved them all.
+        alive = [bot for bot in self.bots.list(conn=conn) if bot.status is not BotStatus.RETIRED]
+        if len(alive) >= MAX_ACTIVE_BOTS:
             raise SpawnRefused(
-                f"the fleet already runs {active} active bots; the cap is {MAX_ACTIVE_BOTS}, "
-                "which is what the box was sized for."
+                f"the fleet already holds {len(alive)} bots that are not retired; the cap "
+                f"is {MAX_ACTIVE_BOTS}, which is what the box was sized for."
             )
 
 
@@ -385,23 +393,38 @@ def retire_descendants(
     :returns: The descendants that were retired.
     """
     retired: list[Bot] = []
+    # A `parent_bot_id` cycle should be impossible — the depth cap and the
+    # activation path both forbid it — but "should be impossible" is not a
+    # termination condition, and this walk is what a retire runs.
+    seen: set[str] = {root.id}
     frontier = bots.children(root.id)
+    failed: list[str] = []
     while frontier:
         child = frontier.pop()
+        if child.id in seen:
+            continue
+        seen.add(child.id)
         if child.status is BotStatus.RETIRED:
             continue
         frontier.extend(bots.children(child.id))
         parent_id = child.parent_bot_id
         try:
-            bots.set_status(child, BotStatus.RETIRED, now=now)
+            bots.set_status(child, BotStatus.RETIRED, now=now, reason="its parent was retired")
         except Exception:
             _logger.exception("could not retire %s while cascading from %s", child.slug, root.slug)
+            failed.append(child.slug)
             continue
         retired.append(child)
         if budgets is not None and parent_id is not None:
             account = budgets.account(child.id)
             if account is not None:
                 budgets.release(parent_id, account.remaining, now=now)
+    if failed:
+        # The caller believes the cascade succeeded otherwise, and a descendant
+        # left running under a retired parent is a bot nobody is watching.
+        _logger.error(
+            "retiring %s left %s running; retire them by hand", root.slug, ", ".join(failed)
+        )
     return retired
 
 

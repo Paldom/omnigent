@@ -205,6 +205,10 @@ class ApprovalStore:
         :param conn: Join an open transaction, or ``None``.
         :returns: The pending request.
         """
+        if not options:
+            # An approval with nothing to choose can be satisfied by an empty
+            # string, which is what an empty form sends.
+            raise ApprovalRefused(f"an approval for {verb!r} must offer at least one option")
         request = ApprovalRequest(
             id=uuid.uuid4().hex,
             bot_id=bot_id,
@@ -293,6 +297,16 @@ class ApprovalStore:
             could mistake for an answer.
         :raises ApprovalRefused: If any binding fails, or the request is closed.
         """
+        # Everything below decides from the *row*, not from the object the
+        # caller handed in. `requires_owner`, `action_hash` and `expires_at`
+        # all came off a dataclass the caller could have built, and the CAS
+        # only fences (id, version, state) — so a never-updated row would have
+        # accepted a fabricated request with `requires_owner=False`.
+        live = self.get(request.id)
+        if live is None:
+            raise ApprovalRefused(f"approval {request.id[:12]} no longer exists")
+        request = live
+
         if not request.is_open:
             raise ApprovalRefused(
                 f"approval {request.id[:12]} is {request.state.value}, not open for a verdict"
@@ -403,7 +417,11 @@ class ApprovalStore:
         :raises ApprovalRefused: If the verb needs a grant and does not have a
             valid, unspent one.
         """
-        if not request.requires_owner:
+        # Re-checked against the list as it stands, not as it stood when the
+        # question was asked. A row can sit for a day; if a verb joined
+        # ALWAYS_OWNER in an upgrade, every pending row from before would
+        # otherwise stay click-answerable.
+        if not (request.requires_owner or request.verb in ALWAYS_OWNER):
             return None
         if self.broker is None:
             raise ApprovalRefused(

@@ -287,11 +287,17 @@ class BotStore:
             row = conn.execute("SELECT * FROM bots WHERE slug = ?", (slug,)).fetchone()
         return _row_to_bot(row) if row is not None else None
 
-    def list(self, *, status: BotStatus | None = None) -> list[Bot]:
+    def list(
+        self,
+        *,
+        status: BotStatus | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[Bot]:
         """
         Every bot, or every bot in one lifecycle state, by slug.
 
         :param status: Restrict to one lifecycle state, or ``None`` for all.
+        :param conn: Join an open transaction, or ``None``.
         :returns: The bots, ordered by slug so the roster is stable between reads.
         """
         sql = "SELECT * FROM bots"
@@ -299,18 +305,19 @@ class BotStore:
         if status is not None:
             sql += " WHERE status = ?"
             params = (status.value,)
-        with self.store.atomic() as conn:
+        with self._tx(conn) as conn:
             rows = conn.execute(sql + " ORDER BY slug", params).fetchall()
         return [_row_to_bot(row) for row in rows]
 
-    def children(self, parent_bot_id: str) -> list[Bot]:
+    def children(self, parent_bot_id: str, *, conn: sqlite3.Connection | None = None) -> list[Bot]:
         """
         Bots this one spawned, for the fan-out cap and the retire cascade.
 
         :param parent_bot_id: The parent.
+        :param conn: Join an open transaction, or ``None``.
         :returns: Its direct children.
         """
-        with self.store.atomic() as conn:
+        with self._tx(conn) as conn:
             rows = conn.execute(
                 "SELECT * FROM bots WHERE parent_bot_id = ? ORDER BY created_at", (parent_bot_id,)
             ).fetchall()

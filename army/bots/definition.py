@@ -194,9 +194,7 @@ def _refuse_privileged_fields(spec: dict[str, Any], *, slug: str, parent: Bot) -
         )
 
 
-def _inherited_config(
-    proposed: dict[str, Any], parent: Bot, *, slug: str
-) -> dict[str, Any]:
+def _inherited_config(proposed: dict[str, Any], parent: Bot, *, slug: str) -> dict[str, Any]:
     """
     Let a child be configured only where its parent already is.
 

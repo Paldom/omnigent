@@ -31,7 +31,7 @@ from army.bots.schedule import first_wake
 from army.bots.spawn import SpawnRefused, SpawnStore
 from army.bots.store import BotStore
 from army.bots.supervisor import BotSupervisor, wake_now
-from army.bots.web import BotsSite, serve
+from army.bots.web import BotsSite, read_or_mint_token, serve
 from army.bots.workspace import Workspace
 from army.config import Config
 from army.gates import GateRefused, Grant
@@ -601,9 +601,22 @@ def cmd_serve(config: Config, args: argparse.Namespace) -> int:
     """
     store = Store(config.state_path)
     bots = BotStore(store)
-    site = BotsSite(store, bots, ApprovalStore(bots, owner_broker(bots)), MessageStore(bots))
+    token = read_or_mint_token()
+    site = BotsSite(
+        store, bots, ApprovalStore(bots, owner_broker(bots)), MessageStore(bots), token
+    )
     server = serve(site, host=args.host, port=args.port)
-    print(f"bots page on http://{args.host}:{args.port}/bots  (ctrl-c to stop)")
+    # The link carries the token so it can be opened on a phone. It is also the
+    # reason the page sends `Cache-Control: no-store` and `Referrer-Policy:
+    # no-referrer` — a secret in a URL leaks through both otherwise.
+    # Flushed: stdout is block-buffered when this is piped to a log, and the
+    # link is the one line the operator actually needs.
+    print(f"bots page on http://{args.host}:{args.port}/bots?token={token}", flush=True)
+    print(
+        "  the token lives in ~/.omnigent/army/web-token, which bots cannot read\n"
+        "  (ctrl-c to stop)",
+        flush=True,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

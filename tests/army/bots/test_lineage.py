@@ -422,3 +422,43 @@ def test_a_slug_cannot_be_a_path(bad: str, bots: BotStore, spawns: SpawnStore) -
     parent = _configured_parent(bots)
     with pytest.raises(SpawnRefused, match="slug"):
         spawns.propose(parent, _child_spec(slug=bad), rationale="x", now=NOW)
+
+
+def test_drafts_count_against_the_fleet_cap(bots: BotStore, spawns: SpawnStore) -> None:
+    """Counting only ACTIVE made drafts free.
+
+    A parent could stack up proposals and the cap only bit at the very last
+    switch-on — by which point a person has already approved them all.
+    """
+    for index in range(MAX_ACTIVE_BOTS):
+        bots.create(make_bot(f"draft-{index}", workload=HEARTBEAT))
+    parent = bots.by_slug("draft-0")
+    assert parent is not None
+    with pytest.raises(SpawnRefused, match="not retired"):
+        spawns.propose(parent, _spec("eleven"), rationale="x", now=NOW)
+
+
+def test_a_retired_bot_frees_a_slot(bots: BotStore, spawns: SpawnStore) -> None:
+    """The cap is on the live fleet, not on everything that ever existed."""
+    for index in range(MAX_ACTIVE_BOTS):
+        bots.create(make_bot(f"draft-{index}", workload=HEARTBEAT))
+    doomed = bots.by_slug("draft-9")
+    assert doomed is not None
+    bots.set_status(doomed, BotStatus.RETIRED, now=NOW)
+
+    parent = bots.by_slug("draft-0")
+    assert parent is not None
+    spawns.propose(parent, _spec("eleven"), rationale="x", now=NOW)
+
+
+def test_the_retire_cascade_terminates_even_on_a_cycle(bots: BotStore) -> None:
+    """ "Should be impossible" is not a termination condition, and this walk runs
+    every time somebody retires a bot."""
+    first = activate(bots, make_bot("first", workload=HEARTBEAT), now=NOW)
+    second = activate(bots, make_bot("second", workload=HEARTBEAT), now=NOW)
+    with bots.store.atomic() as conn:
+        conn.execute("UPDATE bots SET parent_bot_id = ? WHERE id = ?", (first.id, second.id))
+        conn.execute("UPDATE bots SET parent_bot_id = ? WHERE id = ?", (second.id, first.id))
+
+    retired = retire_descendants(bots, None, first, now=NOW + 1)
+    assert {bot.slug for bot in retired} == {"second"}

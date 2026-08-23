@@ -222,10 +222,26 @@ its routes and its navigation, so an integrated page would mean carried patches
 in files that change weekly, in a repository that lands about a hundred issues a
 week. This costs zero upstream files, forever.
 
-> **There is no authentication.** The answer is the tailnet, not a login form
-> nobody would maintain. Bind the tailnet address; never a public one. Anyone
-> who can reach the address can answer approvals — except the owner-only verbs,
-> which still need a signed grant.
+**Every request carries a token**, minted on first run into
+`~/.omnigent/army/web-token` (mode 0600) and printed with the link. That
+directory is one the per-bot sandbox already withholds, which is the whole
+point: reaching the port is not authority, because **bots run on this box with
+network access.** Without the token, a bot's own shell could read the pending
+approvals and answer its own — a complete bypass of the approval machinery by
+the thing it exists to gate, recorded as a human's decision.
+
+```
+GET  /bots?token=…        # or Authorization: Bearer …
+GET  /api/bots?token=…
+POST /verdict             # + Origin check, so another site cannot post here
+```
+
+The card shows what the verdict is **bound to** — the verb, the evidence and
+the action hash — not only the question, which the bot wrote. A human bound to
+a hash of arguments they were never shown is not bound to anything.
+
+An owner-only verb gets no approve button at all. Rendering one that is
+guaranteed to be refused teaches that the buttons are advisory.
 
 `GET /api/bots` returns the same view as JSON, for a phone shortcut or a status
 bar.
