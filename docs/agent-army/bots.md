@@ -183,15 +183,31 @@ A system that approves on silence makes a holiday into a blanket authorisation.
 ### Money-critical verbs do not go through the channel
 
 `spend`, `execute_order` and `add_dependency` are `ALWAYS_OWNER`. A click in a
-bot's channel — or on the web page — never satisfies one. They need a one-shot
-grant signed on the owner's own path:
+bot's channel never satisfies one — the card there has no buttons, and that
+discontinuity is the capability boundary. They need a one-shot grant, bound by
+HMAC to the operation digest and spent through `used_grants` on first use.
+
+Two ways to give one:
 
 ```bash
-army bots approve <id> --grant '<token>'
+army bots approve <id> --grant '<token>'   # a grant minted elsewhere
 ```
 
-With no `ARMY_BROKER_KEY` configured, those verbs are **refused outright**.
-Refusing is safe; pretending there is a boundary is not.
+…or **Owner approvals** in the Bots section, which mints the grant against the
+digest on the card and spends it in the same transaction as the verdict. The
+button stays disabled until you affirm you are the owner and that you authorise
+*that* operation; the digest is on the card because signing a fingerprint you
+were never shown is signing a blank.
+
+That is a real capability, so be clear about what guards it: not the button,
+but the fact that the signing key is in an environment a bot's sandbox does not
+get. `tests/army/test_gates.py` asserts `ARMY_BROKER_KEY` never reaches an
+agent's environment — that assertion is the boundary, and the surfaces above
+are two doors onto the same side of it.
+
+With no `ARMY_BROKER_KEY` configured, those verbs are **refused outright** and
+the card says so instead of offering a button. Refusing is safe; pretending
+there is a boundary is not.
 
 ---
 
@@ -229,11 +245,28 @@ omnigent serve         # the app, as usual
 ```
 
 Then **Bots** in the main navigation, at `/bots`. Three columns, following
-`plan-2/ui-mock/bots.html`: a roster that leads with **Needs you**, the selected
-bot's channel with pending approvals pinned above the stream, and a dock over
-Files / Runs / Setup. The nav row carries a count of bots waiting on a person —
-the reason to integrate at all, since a badge is how you learn about one while
-doing something else.
+`plan-2/ui-mock/bots.html`: a roster, the selected thing's channel, and a dock
+over Files / Runs / Setup. The nav row carries a count of everything waiting on
+a person — the reason to integrate at all, since a badge is how you learn about
+one while doing something else.
+
+The roster has four sections, ordered by consequence rather than by kind:
+
+| Section | What it holds | What a click does |
+|---|---|---|
+| **Owner approvals** | `spend`, `execute_order`, `add_dependency` | Mints a one-shot grant, after you affirm you are the owner |
+| **Needs you** | Bots parked on a question | Answers it through the same bound path the CLI uses |
+| **Draft** | Bots another bot proposed | Activates, keeps as a draft, or discards |
+| **Bots** | Everything else | Opens its channel, ledger and setup |
+
+The mock draws these as three screens; they are one section here because a
+proposal you have to navigate somewhere else to find is a proposal nobody
+reads.
+
+**Activate and Keep as draft are different buttons on purpose.** The store
+creates an adopted child in `DRAFT`: saying a bot should exist is a separate
+act from switching it on, so approving several proposals in a row has not
+started several bots.
 
 `omnigent/server/routes/bots.py` **forwards** to the control plane on loopback.
 It imports nothing from `army`, holds the token server-side so the browser never

@@ -1,15 +1,10 @@
-"""The Bots surface, served by this process rather than built into Omnigent.
+"""The Bots surface, served by this process rather than only by the app.
 
-The obvious place for a roster is a section in the Omnigent web app. It is also
-the one part of Bot mode that would cost something at every rebase: upstream
-hard-codes its routes and its navigation, so an integrated page means carried
-patches in files that change weekly, forever, in a repository that lands about
-a hundred issues a week.
-
-Serving it here instead costs one page and no upstream files. The deployment is
-already one always-on box reached over Tailscale, so a second port on that box
-is the same journey for the operator — and the page can be opened from a phone,
-which is the whole reason the approval path had to be answerable from one.
+Omnigent's web app has a Bots section (``omnigent/server/routes/bots.py``
+forwards to the JSON here). This page is the other way in: it needs no Omnigent
+server, it is what that proxy talks to, and it opens on a phone over the
+tailnet — which is the whole reason the approval path had to be answerable from
+one.
 
 No framework, no build step, no new dependency: :mod:`http.server` and a string.
 The design tokens are read from Omnigent's own ``index.css`` so the page looks
@@ -32,10 +27,14 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from army.bots.approvals import ApprovalRefused, ApprovalStore
-from army.bots.messages import MessageStore
-from army.bots.model import DerivedStatus
+from army.bots.budget import BudgetExhausted
+from army.bots.messages import MessageKind, MessageStore
+from army.bots.model import BotStatus, DerivedStatus
 from army.bots.roster import RosterEntry, roster, summarise
+from army.bots.schedule import first_wake
+from army.bots.spawn import SpawnRefused
 from army.bots.store import BotStore
+from army.gates import GateRefused, digest
 from army.store import ConcurrentTransition, Store
 
 _logger = logging.getLogger(__name__)
@@ -497,7 +496,7 @@ class BotsSite:
         self.messages.post(
             request.bot_id,
             "web:token",
-            __import__("army.bots.messages", fromlist=["MessageKind"]).MessageKind.VERDICT,
+            MessageKind.VERDICT,
             f"{'Approved' if approved else 'Denied'}" + (f": {choice}" if approved else ""),
             now=now,
             payload={"approval_id": request.id, "approved": approved},
@@ -506,6 +505,150 @@ class BotsSite:
             command_id=command.id,
         )
         return f"Recorded {command.kind.value}; the loop applies it on its next tick.", ""
+
+    def sign(self, form: dict[str, list[str]], *, now: int) -> tuple[str, str]:
+        """
+        Answer an owner-only verb, on the owner's own path.
+
+        ``spend``, ``execute_order`` and ``add_dependency`` are refused
+        everywhere else — a click in a bot's channel does not reach this, and
+        neither does anything a bot can call. What makes *this* the owner path
+        is the same property the token has: the signing key is in an
+        environment a bot's sandbox does not get, asserted by
+        ``tests/army/test_gates.py``'s leak check.
+
+        The grant is minted against the operation digest the row already holds,
+        so it authorises this operation and no other; it is spent through
+        ``used_grants`` on first use, so the same approval cannot pay twice.
+
+        :param form: ``approval``, ``decision``, and ``confirm`` — which must
+            be present and affirmative for an approval. A signature nobody
+            actively gave is the failure mode this whole path exists to avoid.
+        :param now: Epoch seconds.
+        :returns: ``(notice, problem)``, one of which is empty.
+        """
+        approval_id = _first(form, "approval")
+        if not _ID.match(approval_id):
+            return "", "that is not an approval id"
+        request = self.approvals.get(approval_id)
+        if request is None:
+            return "", "no approval matching that id"
+        if not request.requires_owner:
+            # Not merely unnecessary — routing an ordinary verb through the
+            # owner path would spend a grant on a question that never needed
+            # one, and log it as an owner decision.
+            return "", f"{request.verb} is not owner-only; answer it in the channel"
+
+        decision = _first(form, "decision")
+        if decision not in ("sign", "refuse"):
+            return "", "a verdict must say sign or refuse"
+        approved = decision == "sign"
+        if approved and _first(form, "confirm") != "yes":
+            return "", "the owner confirmation was not given"
+
+        broker = self.approvals.broker
+        if approved and broker is None:
+            return "", (
+                f"{request.verb} is owner-only and no broker is configured. "
+                "Set ARMY_BROKER_KEY on the control plane and try again."
+            )
+
+        run = self.store.get_run(request.run_id)
+        try:
+            grant = (
+                broker.sign(
+                    request.verb,
+                    {"action_hash": request.action_hash},
+                    now=now,
+                    owner_confirmed=True,
+                )
+                if approved and broker is not None
+                else None
+            )
+            command = self.approvals.decide(
+                request,
+                approved=approved,
+                decided_by="web:owner",
+                now=now,
+                choice=_first(form, "choice") or None if approved else None,
+                run_version=run.version if run is not None else -1,
+                grant=grant,
+            )
+        except (ApprovalRefused, ConcurrentTransition, GateRefused) as exc:
+            return "", str(exc)
+
+        self.messages.post(
+            request.bot_id,
+            "web:owner",
+            MessageKind.VERDICT,
+            ("Signed and released" if approved else "Refused") + f": {request.verb}",
+            now=now,
+            payload={"approval_id": request.id, "approved": approved, "owner": True},
+            thread_id=request.thread_id,
+            run_id=request.run_id,
+            command_id=command.id,
+        )
+        return f"Recorded {command.kind.value}; the loop applies it on its next tick.", ""
+
+    def adopt(self, form: dict[str, list[str]], *, now: int) -> tuple[str, str]:
+        """
+        Decide a bot another bot asked for.
+
+        Three outcomes, not two, because the store draws the line in two
+        places. ``SpawnStore.activate`` creates the child in ``DRAFT``: saying
+        the bot *should exist* is a different act from *switching it on*, so
+        approving ten proposals in a row has not started ten bots. This
+        exposes both, and switching on is the only one that also writes a wake.
+
+        The caps that matter — depth, fan-out, fleet size, and the allowance
+        carved from the parent rather than added to the pool — are enforced in
+        the store, so this only decides.
+
+        :param form: ``spawn``, ``decision`` (``activate``, ``draft`` or
+            ``refuse``), and an optional ``because``.
+        :param now: Epoch seconds.
+        :returns: ``(notice, problem)``, one of which is empty.
+        """
+        if self.spawns is None:
+            return "", "proposals are not enabled on this control plane"
+        spawn_id = _first(form, "spawn")
+        if not _ID.match(spawn_id):
+            return "", "that is not a proposal id"
+        request = self.spawns.get(spawn_id)
+        if request is None:
+            return "", "no proposal matching that id"
+
+        decision = _first(form, "decision")
+        if decision not in ("activate", "draft", "refuse"):
+            return "", "a decision must say activate, draft or refuse"
+        try:
+            if decision == "refuse":
+                self.spawns.refuse(
+                    request,
+                    decided_by="web:token",
+                    because=_first(form, "because") or "refused from the page",
+                    now=now,
+                )
+                return f"{request.slug} was refused; nothing was created.", ""
+
+            bot = self.spawns.activate(request, decided_by="web:token", now=now)
+            if decision == "draft":
+                return (
+                    f"{bot.slug} exists as a draft with {request.allowance} iterations. "
+                    "Switch it on when you are ready.",
+                    "",
+                )
+            # A first wake, or it would be active and never due — which derives
+            # as `blocked` and reads as a bug rather than as a bot nobody woke.
+            self.bots.set_status(
+                bot, BotStatus.ACTIVE, now=now, wake=first_wake(bot.wake, now=now)
+            )
+        except (SpawnRefused, BudgetExhausted, ConcurrentTransition) as exc:
+            # BudgetExhausted is the common one and it is not an error: the
+            # parent cannot afford the child it asked for. Letting it escape
+            # would 500 the page on the most ordinary refusal there is.
+            return "", str(exc)
+        return f"{bot.slug} is active, with {request.allowance} iterations.", ""
 
     def bot_json(self, slug: str, *, now: int) -> str | None:
         """
@@ -628,9 +771,70 @@ class BotsSite:
                     }
                     for request in self.approvals.pending()
                 ],
+                # Owner-only verbs, separated because they are answered on a
+                # different path and must never be rendered as an ordinary
+                # question with an approve button.
+                "owner": [
+                    self._owner_json(request)
+                    for request in self.approvals.pending()
+                    if request.requires_owner
+                ],
+                # Whether a signature is possible at all. Without a key the
+                # page must say so rather than offer a button that is certain
+                # to be refused.
+                "can_sign": self.approvals.broker is not None,
+                "drafts": [self._draft_json(request) for request in self._proposals()],
             },
             indent=2,
         )
+
+    def _proposals(self) -> list[Any]:
+        """Pending spawn requests, or nothing when proposals are disabled."""
+        return list(self.spawns.pending()) if self.spawns is not None else []
+
+    def _owner_json(self, request: Any) -> dict[str, Any]:
+        """
+        One owner-only request, with everything a signature would be bound to.
+
+        The digest is what the grant is signed over, so it is shown. Signing
+        something whose fingerprint you were never given is signing a blank.
+        """
+        bot = self.bots.get(request.bot_id)
+        return {
+            "id": request.id,
+            "bot_id": request.bot_id,
+            "bot": bot.slug if bot else request.bot_id[:12],
+            "verb": request.verb,
+            "question": request.question,
+            "options": request.options,
+            "evidence": request.evidence,
+            "action_hash": request.action_hash,
+            "digest": digest(request.verb, {"action_hash": request.action_hash}),
+            "policy_version": request.policy_version,
+            "run_id": request.run_id,
+            "run_version": request.run_version,
+            "expires_at": request.expires_at,
+            "created_at": request.created_at,
+        }
+
+    def _draft_json(self, request: Any) -> dict[str, Any]:
+        """
+        One proposal: the pitch, and the definition it would actually create.
+
+        Both, never just the first. The rationale is what the bot says it
+        wants; the definition is what it would get, and approving the one
+        without reading the other is the whole attack.
+        """
+        parent = self.bots.get(request.parent_bot_id)
+        return {
+            "id": request.id,
+            "slug": request.slug,
+            "parent": parent.slug if parent else request.parent_bot_id[:12],
+            "rationale": request.rationale,
+            "allowance": request.allowance,
+            "definition": request.definition,
+            "created_at": request.created_at,
+        }
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -711,7 +915,17 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         route = urlparse(self.path)
-        if route.path != "/verdict":
+        # Three write paths, and they are separate on purpose: an ordinary
+        # verdict, an owner signature, and adopting a proposed bot are three
+        # different authorities, so one handler cannot be talked into doing
+        # the wrong one of them with an unexpected field.
+        actions = {
+            "/verdict": self.site.verdict,
+            "/owner/sign": self.site.sign,
+            "/spawn/adopt": self.site.adopt,
+        }
+        action = actions.get(route.path)
+        if action is None:
             self._send(404, "", "text/plain")
             return
         length = int(self.headers.get("Content-Length") or 0)
@@ -732,7 +946,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(403, _page("Refused", "<h1>Refused</h1>"), _HTML)
             return
 
-        notice, problem = self.site.verdict(form, now=int(time.time()))
+        notice, problem = action(form, now=int(time.time()))
         # Redirect after post, so a refresh does not re-answer the question,
         # and carry a code rather than prose — a message echoed into the page
         # is a phishing surface inside a card the operator trusts.

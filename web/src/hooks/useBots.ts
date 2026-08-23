@@ -9,7 +9,15 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { answerApproval, getBot, listBots, type BotDetail, type BotFleet } from "@/lib/botsApi";
+import {
+  adoptDraft,
+  answerApproval,
+  getBot,
+  listBots,
+  signOwnerRequest,
+  type BotDetail,
+  type BotFleet,
+} from "@/lib/botsApi";
 
 /** Query key for the fleet. */
 export const BOTS_KEY = ["bots"] as const;
@@ -64,7 +72,11 @@ export function useBotsNeedingYou(): number {
     retry: false,
   });
   if (!data?.running) return 0;
-  return data.bots.filter((bot) => bot.needsHuman).length;
+  // Three things want a person, and the badge counts all of them: a bot with
+  // an open question, a verb only the owner may sign, and a bot waiting to be
+  // let into the fleet. A badge that undercounts is worse than none, because
+  // it is trusted.
+  return data.bots.filter((bot) => bot.needsHuman).length + data.owner.length + data.drafts.length;
 }
 
 /**
@@ -81,5 +93,31 @@ export function useAnswerApproval(slug: string | null) {
       void queryClient.invalidateQueries({ queryKey: BOTS_KEY });
       if (slug) void queryClient.invalidateQueries({ queryKey: botKey(slug) });
     },
+  });
+}
+
+/**
+ * Sign or refuse an owner-only verb.
+ *
+ * Invalidates the bot as well as the fleet: the signature settles a run in
+ * that bot's channel, and its channel is the audit trail.
+ */
+export function useSignOwnerRequest(slug: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: signOwnerRequest,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: BOTS_KEY });
+      if (slug) void queryClient.invalidateQueries({ queryKey: botKey(slug) });
+    },
+  });
+}
+
+/** Activate or refuse a proposed bot. Either way the roster changes. */
+export function useAdoptDraft() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: adoptDraft,
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: BOTS_KEY }),
   });
 }

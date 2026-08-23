@@ -149,4 +149,60 @@ def create_bots_router(*, auth_provider: AuthProvider | None = None) -> APIRoute
             },
         )
 
+    @router.post("/bots/owner")
+    async def sign(request: Request) -> dict[str, Any]:
+        """
+        Answer an owner-only verb — ``spend``, ``execute_order``,
+        ``add_dependency``.
+
+        A separate route from the one above rather than a flag on it. These
+        are the three operations a bot's channel may never resolve, and the
+        control plane mints a one-shot grant bound to the operation digest
+        before it will record one. Sharing a handler would mean one missing
+        field is the difference between the two authorities.
+
+        ``confirmed`` must be explicitly true: the grant is a signature, and a
+        signature nobody actively gave is the failure this path exists to
+        prevent.
+        """
+        require_user(request, auth_provider)
+        body = await request.json()
+        return await _forward(
+            "POST",
+            "/owner/sign",
+            data={
+                "approval": str(body.get("approval", "")),
+                "choice": str(body.get("choice", "")),
+                "decision": "sign" if body.get("approved") else "refuse",
+                "confirm": "yes" if body.get("confirmed") is True else "",
+            },
+        )
+
+    @router.post("/bots/adopt")
+    async def adopt(request: Request) -> dict[str, Any]:
+        """
+        Decide a bot that another bot proposed.
+
+        Activation is the human act that keeps replication bounded, so it is a
+        route rather than something a tick can do — and it is two acts, not
+        one: ``draft`` creates the bot dormant, ``activate`` also switches it
+        on. Anything unrecognised falls through to ``refuse``, because the safe
+        reading of an unclear instruction about creating a bot is *no*.
+
+        The caps — depth, fan-out, fleet size, and the allowance carved from
+        the parent — are enforced in the store, not here.
+        """
+        require_user(request, auth_provider)
+        body = await request.json()
+        decision = str(body.get("decision", ""))
+        return await _forward(
+            "POST",
+            "/spawn/adopt",
+            data={
+                "spawn": str(body.get("spawn", "")),
+                "decision": decision if decision in ("activate", "draft") else "refuse",
+                "because": str(body.get("because", "")),
+            },
+        )
+
     return router

@@ -108,6 +108,46 @@ export interface BotDetail {
   pending: BotApproval[];
 }
 
+/**
+ * An owner-only request, and everything a signature would be bound to.
+ *
+ * Kept apart from `BotApproval` because it is answered on a different path.
+ * Rendering one as an ordinary question with an approve button is exactly the
+ * confusion the `ALWAYS_OWNER` list exists to prevent.
+ */
+export interface OwnerRequest {
+  id: string;
+  botId: string;
+  /** The bot's slug, so a row can say who is asking without a second fetch. */
+  bot: string;
+  verb: string;
+  question: string;
+  options: string[];
+  evidence: Record<string, unknown>;
+  actionHash: string;
+  /** What the grant is signed over. Signing an unseen fingerprint is signing a blank. */
+  digest: string;
+  policyVersion: string;
+  runId: string;
+  runVersion: number;
+  expiresAt: number | null;
+  createdAt: number;
+}
+
+/** A bot that another bot asked for, and the definition it would get. */
+export interface BotDraft {
+  id: string;
+  slug: string;
+  /** Who proposed it. */
+  parent: string;
+  /** Why, in the parent's own words. */
+  rationale: string;
+  /** Iterations carved from the parent — not added to the pool. */
+  allowance: number;
+  definition: Record<string, unknown>;
+  createdAt: number;
+}
+
 /** The fleet, plus whatever is waiting on a person across all of it. */
 export interface BotFleet {
   /** `false` when the control plane is not running; `reason` says why. */
@@ -116,6 +156,10 @@ export interface BotFleet {
   counts: Record<string, number>;
   bots: BotSummary[];
   pending: { id: string; botId: string; question: string; requiresOwner: boolean }[];
+  owner: OwnerRequest[];
+  /** Whether a broker key is configured. Without one, no signature is possible. */
+  canSign: boolean;
+  drafts: BotDraft[];
 }
 
 interface WireSummary {
@@ -172,6 +216,37 @@ function toApproval(row: any): BotApproval {
   };
 }
 
+function toOwner(row: any): OwnerRequest {
+  return {
+    id: row.id,
+    botId: row.bot_id,
+    bot: row.bot,
+    verb: row.verb,
+    question: row.question,
+    options: row.options ?? [],
+    evidence: row.evidence ?? {},
+    actionHash: row.action_hash,
+    digest: row.digest,
+    policyVersion: row.policy_version,
+    runId: row.run_id,
+    runVersion: row.run_version,
+    expiresAt: row.expires_at ?? null,
+    createdAt: row.created_at,
+  };
+}
+
+function toDraft(row: any): BotDraft {
+  return {
+    id: row.id,
+    slug: row.slug,
+    parent: row.parent,
+    rationale: row.rationale,
+    allowance: row.allowance,
+    definition: row.definition ?? {},
+    createdAt: row.created_at,
+  };
+}
+
 /** Read the fleet. */
 export async function listBots(): Promise<BotFleet> {
   const response = await authenticatedFetch("/v1/bots");
@@ -188,6 +263,9 @@ export async function listBots(): Promise<BotFleet> {
       question: row.question,
       requiresOwner: Boolean(row.requires_owner),
     })),
+    owner: (body.owner ?? []).map(toOwner),
+    canSign: Boolean(body.can_sign),
+    drafts: (body.drafts ?? []).map(toDraft),
   };
 }
 
@@ -235,17 +313,70 @@ export async function answerApproval(input: {
   approval: string;
   choice: string;
   approved: boolean;
-}): Promise<{ ok: boolean; reason?: string }> {
-  const response = await authenticatedFetch("/v1/bots/verdict", {
+}): Promise<Verdict> {
+  return post("/v1/bots/verdict", input, "The verdict was refused.");
+}
+
+/**
+ * Sign an owner-only verb, or refuse it.
+ *
+ * A different endpoint from `answerApproval`, matching a different authority.
+ * The control plane mints a one-shot grant bound to the operation digest and
+ * spends it through `used_grants`, so the same approval cannot pay twice — and
+ * `confirmed` must be literally `true`, because the grant stands in for a
+ * signature.
+ */
+export async function signOwnerRequest(input: {
+  approval: string;
+  choice?: string;
+  approved: boolean;
+  confirmed: boolean;
+}): Promise<Verdict> {
+  return post("/v1/bots/owner", input, "The signature was refused.");
+}
+
+/**
+ * Decide a proposed bot.
+ *
+ * Three outcomes, because the store draws the line in two places: creating the
+ * bot and switching it on are separate acts, so `draft` creates it dormant and
+ * `activate` also writes its first wake.
+ *
+ * The caps that make replication bounded — depth, fan-out, fleet size, and the
+ * allowance carved from the parent — are enforced where they are owned, so a
+ * refusal here arrives as a sentence rather than as a silently smaller bot.
+ */
+export async function adoptDraft(input: {
+  spawn: string;
+  decision: "activate" | "draft" | "refuse";
+  because?: string;
+}): Promise<Verdict> {
+  return post("/v1/bots/adopt", input, "The proposal was not decided.");
+}
+
+/** What every write returns: it worked, or it says why not. */
+export interface Verdict {
+  ok: boolean;
+  reason?: string;
+}
+
+/**
+ * POST and read the control plane's answer.
+ *
+ * A refusal comes back as the reason in the URL the control plane redirected
+ * to, which is where it puts one — this is the only place that has to know.
+ */
+async function post(path: string, input: unknown, fallback: string): Promise<Verdict> {
+  const response = await authenticatedFetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
-  if (!response.ok) throw new Error(`verdict: ${response.status}`);
+  if (!response.ok) throw new Error(`${path}: ${response.status}`);
   const body: any = await response.json();
   if (!body.running) return { ok: false, reason: body.reason };
   if (body.ok) return { ok: true };
   const location = String(body.location ?? "");
   const err = /[?&]err=([^&]*)/.exec(location);
-  return { ok: false, reason: err ? decodeURIComponent(err[1]) : "The verdict was refused." };
+  return { ok: false, reason: err ? decodeURIComponent(err[1]) : fallback };
 }

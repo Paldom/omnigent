@@ -277,6 +277,35 @@ running = bots.by_slug("cartographer")
 run = store.create_run(Run.new("heartbeat", {"beat": 1}, now=NOW, bot_id=running.id))
 store.transition(run, RunState.DISPATCHING, now=NOW)
 
+# ── a verb only the owner may answer ──────────────────────────────
+# treasurer parks on `spend`, which is in ALWAYS_OWNER. Nothing in its own
+# channel can resolve this, and the roster shows it under its own heading —
+# the discontinuity between the two surfaces is the capability boundary.
+spend_run = store.create_run(
+    Run.new("heartbeat", {"beat": 1}, now=NOW - 1080, bot_id=treasurer.id)
+)
+for step in (
+    RunState.DISPATCHING,
+    RunState.COLLECTING,
+    RunState.EVALUATING,
+    RunState.WAITING_HUMAN,
+):
+    spend_run = store.transition(spend_run, step, now=NOW - 1080)
+approvals.request(
+    bot_id=treasurer.id,
+    run_id=spend_run.id,
+    run_version=spend_run.version,
+    verb="spend",
+    parameters={"provider": "polygon", "usd": 40.00},
+    question="Market data top-up",
+    # The store insists on at least one, and the card does not render them as
+    # buttons: a signature is not a menu, so the only choices are sign and
+    # refuse, and neither comes from a list a bot authored.
+    options=["pay"],
+    evidence={"amount": "$40.00", "provider": "polygon", "runway": "6 days left"},
+    now=NOW - 1080,
+)
+
 # ── a bot proposing a bot ─────────────────────────────────────────
 spawns.propose(
     scout,

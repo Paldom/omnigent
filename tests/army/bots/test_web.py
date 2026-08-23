@@ -8,6 +8,8 @@ it may execute.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from army.bots.approvals import (
@@ -16,10 +18,13 @@ from army.bots.approvals import (
     ApprovalState,
     ApprovalStore,
 )
+from army.bots.budget import BudgetStore
 from army.bots.messages import MessageKind, MessageStore
 from army.bots.model import BotStatus, WakeKind, WakePolicy
+from army.bots.spawn import SpawnStore
 from army.bots.store import BotStore
 from army.bots.web import BotsSite
+from army.gates import Broker
 from army.state import CommandKind, Run
 from army.store import Store
 from tests.army.bots.conftest import activate, make_bot
@@ -435,3 +440,317 @@ def test_a_genuine_cross_site_post_is_still_refused() -> None:
 def test_a_client_that_sends_no_origin_at_all_is_allowed() -> None:
     """curl with the token is a legitimate caller; the token is the control."""
     assert _origin_check({"Host": "127.0.0.1:6768"}) is True
+
+
+# ── the owner path ────────────────────────────────────────────────
+#
+# The three verbs in ALWAYS_OWNER are the only ones the page may not resolve in
+# a bot's channel. What makes this the owner's own path is not a flag in a form
+# — it is that the signing key lives in an environment the per-bot sandbox does
+# not get, which `tests/army/test_gates.py` asserts separately.
+
+
+@pytest.fixture()
+def signing_site(store: Store, bots: BotStore) -> BotsSite:
+    """A site whose control plane has a broker, so a signature is possible."""
+    approvals = ApprovalStore(bots, Broker("a-test-key", spender=store.consume_grant))
+    return BotsSite(store, bots, approvals, MessageStore(bots), TOKEN)
+
+
+def test_a_signature_needs_the_owner_to_actually_say_so(
+    signing_site: BotsSite, bots: BotStore
+) -> None:
+    """
+    The confirmation is the signature.
+
+    Without it a POST that merely reached the endpoint would mint a grant, and
+    the affirmation on the card would be decoration.
+    """
+    bot = activate(bots, make_bot("treasurer", workload=HEARTBEAT), now=NOW)
+    request = _ask(signing_site, bot.id, verb="spend", parameters={"amount": 40})
+
+    _notice, problem = signing_site.sign(
+        {"approval": [request.id], "decision": ["sign"]},  # type: ignore[attr-defined]
+        now=NOW,
+    )
+    assert "confirmation" in problem
+    reread = signing_site.approvals.get(request.id)  # type: ignore[attr-defined]
+    assert reread is not None and reread.state is ApprovalState.PENDING
+
+
+def test_a_confirmed_signature_mints_a_grant_and_settles_the_question(
+    signing_site: BotsSite, bots: BotStore
+) -> None:
+    """The path that exists so spend is answerable by someone rather than nobody."""
+    bot = activate(bots, make_bot("treasurer", workload=HEARTBEAT), now=NOW)
+    request = _ask(signing_site, bot.id, verb="spend", parameters={"amount": 40})
+
+    notice, problem = signing_site.sign(
+        {
+            "approval": [request.id],  # type: ignore[attr-defined]
+            "decision": ["sign"],
+            "confirm": ["yes"],
+        },
+        now=NOW,
+    )
+    assert problem == "" and "approve" in notice
+    reread = signing_site.approvals.get(request.id)  # type: ignore[attr-defined]
+    assert reread is not None
+    assert reread.state is ApprovalState.APPROVED
+    # The nonce is recorded, which is what makes the grant a permission rather
+    # than a capability that keeps working until it expires.
+    assert reread.grant_nonce
+
+
+def test_the_same_signature_cannot_pay_twice(signing_site: BotsSite, bots: BotStore) -> None:
+    """One approval, one payment. The second attempt loses on the nonce."""
+    bot = activate(bots, make_bot("treasurer", workload=HEARTBEAT), now=NOW)
+    request = _ask(signing_site, bot.id, verb="spend", parameters={"amount": 40})
+    form = {
+        "approval": [request.id],  # type: ignore[attr-defined]
+        "decision": ["sign"],
+        "confirm": ["yes"],
+    }
+
+    signing_site.sign(form, now=NOW)
+    _notice, problem = signing_site.sign(form, now=NOW)
+    assert problem != ""
+
+
+def test_an_ordinary_verb_cannot_be_routed_through_the_owner_path(
+    signing_site: BotsSite, bots: BotStore
+) -> None:
+    """
+    Otherwise an iteration gate would spend a grant it never needed, and be
+    logged as an owner decision.
+    """
+    bot = activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    request = _ask(signing_site, bot.id)
+
+    _notice, problem = signing_site.sign(
+        {
+            "approval": [request.id],  # type: ignore[attr-defined]
+            "decision": ["sign"],
+            "confirm": ["yes"],
+        },
+        now=NOW,
+    )
+    assert "not owner-only" in problem
+
+
+def test_with_no_broker_a_signature_is_refused_rather_than_skipped(
+    site: BotsSite, bots: BotStore
+) -> None:
+    """A missing key must not become an unguarded approval."""
+    bot = activate(bots, make_bot("treasurer", workload=HEARTBEAT), now=NOW)
+    request = _ask(site, bot.id, verb="spend", parameters={"amount": 40})
+
+    _notice, problem = site.sign(
+        {
+            "approval": [request.id],  # type: ignore[attr-defined]
+            "decision": ["sign"],
+            "confirm": ["yes"],
+        },
+        now=NOW,
+    )
+    assert "ARMY_BROKER_KEY" in problem
+    reread = site.approvals.get(request.id)  # type: ignore[attr-defined]
+    assert reread is not None and reread.state is ApprovalState.PENDING
+
+
+def test_refusing_an_owner_request_needs_no_grant(site: BotsSite, bots: BotStore) -> None:
+    """
+    Demanding a signature before someone may say *no* is how a gate becomes a
+    nuisance people route around — and refusal is the safe direction anyway.
+    """
+    bot = activate(bots, make_bot("treasurer", workload=HEARTBEAT), now=NOW)
+    request = _ask(site, bot.id, verb="spend", parameters={"amount": 40})
+
+    notice, problem = site.sign(
+        {"approval": [request.id], "decision": ["refuse"]},  # type: ignore[attr-defined]
+        now=NOW,
+    )
+    assert problem == "" and "deny" in notice
+
+
+def test_the_json_view_separates_owner_requests_from_ordinary_ones(
+    signing_site: BotsSite, bots: BotStore
+) -> None:
+    """
+    So the page cannot render one as the other.
+
+    The digest is included because a signature is over a fingerprint, and one
+    the operator was never shown is one they did not really give.
+    """
+    scout = activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    treasurer = activate(bots, make_bot("treasurer", workload=HEARTBEAT), now=NOW)
+    _ask(signing_site, scout.id)
+    _ask(signing_site, treasurer.id, verb="spend", parameters={"amount": 40})
+
+    payload = json.loads(signing_site.api(now=NOW))
+    assert len(payload["pending"]) == 2
+    assert [row["bot"] for row in payload["owner"]] == ["treasurer"]
+    assert payload["owner"][0]["digest"]
+    assert payload["can_sign"] is True
+
+
+# ── adopting a proposed bot ───────────────────────────────────────
+#
+# Activation is the human act that keeps replication bounded. The page decides;
+# the store does the arithmetic, so a refusal here is the same refusal the CLI
+# would give.
+
+
+@pytest.fixture()
+def spawning_site(store: Store, bots: BotStore) -> BotsSite:
+    """A site with proposals enabled and a parent that can afford a child."""
+    budgets = BudgetStore(bots)
+    return BotsSite(
+        store,
+        bots,
+        ApprovalStore(bots),
+        MessageStore(bots),
+        TOKEN,
+        spawns=SpawnStore(bots, budgets),
+        budgets=budgets,
+    )
+
+
+def _propose(
+    site: BotsSite, bots: BotStore, *, allowance: int = 30, wake: dict | None = None
+) -> object:
+    parent = activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    BudgetStore(bots).grant(parent.id, 100)
+    return site.spawns.propose(
+        parent,
+        {
+            "slug": "prospector",
+            "persona": "a child",
+            "mission": "find datasets",
+            "workload": HEARTBEAT,
+            "wake": wake or {"kind": "manual"},
+        },
+        rationale="nobody is indexing these",
+        now=NOW,
+        allowance=allowance,
+    )
+
+
+def test_the_json_view_shows_the_definition_a_proposal_would_create(
+    spawning_site: BotsSite, bots: BotStore
+) -> None:
+    """
+    Both halves.
+
+    The rationale is what the parent says it wants; the definition is what
+    would actually exist. A page that shows only the first is a page that gets
+    a workload pointed somewhere it should not be.
+    """
+    _propose(spawning_site, bots)
+    payload = json.loads(spawning_site.api(now=NOW))
+
+    draft = payload["drafts"][0]
+    assert draft["slug"] == "prospector"
+    assert draft["parent"] == "scout"
+    assert draft["rationale"] == "nobody is indexing these"
+    assert draft["allowance"] == 30
+    assert draft["definition"]["workload"] == HEARTBEAT
+
+
+def test_activating_from_the_page_carves_the_allowance_from_the_parent(
+    spawning_site: BotsSite, bots: BotStore
+) -> None:
+    """A bot cannot create capacity by creating bots."""
+    request = _propose(spawning_site, bots)
+    notice, problem = spawning_site.adopt(
+        {"spawn": [request.id], "decision": ["activate"]},  # type: ignore[attr-defined]
+        now=NOW,
+    )
+    assert problem == "" and "prospector" in notice
+
+    child = bots.by_slug("prospector")
+    assert child is not None
+    budgets = BudgetStore(bots)
+    assert budgets.account(child.id).allowance == 30  # type: ignore[union-attr]
+    assert budgets.account(bots.by_slug("scout").id).remaining == 70  # type: ignore[union-attr]
+
+
+def test_activate_actually_switches_the_bot_on(spawning_site: BotsSite, bots: BotStore) -> None:
+    """
+    The store creates the child in DRAFT, deliberately — so a page whose button
+    says "Activate" has to do the second half itself, or it is lying. It also
+    needs a first wake: active and never due derives as `blocked`, which reads
+    as a bug rather than as a bot nobody woke.
+    """
+    request = _propose(
+        spawning_site,
+        bots,
+        wake={"kind": "continuous", "precondition": "always", "min_interval_s": 600},
+    )
+    spawning_site.adopt(
+        {"spawn": [request.id], "decision": ["activate"]},  # type: ignore[attr-defined]
+        now=NOW,
+    )
+    child = bots.by_slug("prospector")
+    assert child is not None
+    assert child.status is BotStatus.ACTIVE
+    assert child.next_due_at is not None
+
+
+def test_keeping_it_as_a_draft_creates_the_bot_without_starting_it(
+    spawning_site: BotsSite, bots: BotStore
+) -> None:
+    """
+    Two decisions, not one.
+
+    Saying a bot should exist is separate from switching it on, so approving
+    several proposals in a row has not started several bots.
+    """
+    request = _propose(spawning_site, bots)
+    notice, problem = spawning_site.adopt(
+        {"spawn": [request.id], "decision": ["draft"]},  # type: ignore[attr-defined]
+        now=NOW,
+    )
+    assert problem == "" and "draft" in notice
+
+    child = bots.by_slug("prospector")
+    assert child is not None
+    assert child.status is BotStatus.DRAFT
+    assert child.next_due_at is None
+    # The allowance was still carved: the bot exists, so its budget does too.
+    assert BudgetStore(bots).account(child.id).allowance == 30  # type: ignore[union-attr]
+
+
+def test_a_proposal_the_parent_cannot_afford_is_refused_with_a_reason(
+    spawning_site: BotsSite, bots: BotStore
+) -> None:
+    """The caps live in the store, so the page cannot talk its way past them."""
+    request = _propose(spawning_site, bots, allowance=500)
+    _notice, problem = spawning_site.adopt(
+        {"spawn": [request.id], "decision": ["activate"]},  # type: ignore[attr-defined]
+        now=NOW,
+    )
+    assert "100 iterations left" in problem
+    assert bots.by_slug("prospector") is None
+
+
+def test_discarding_a_proposal_creates_nothing(spawning_site: BotsSite, bots: BotStore) -> None:
+    request = _propose(spawning_site, bots)
+    notice, problem = spawning_site.adopt(
+        {"spawn": [request.id], "decision": ["refuse"]},  # type: ignore[attr-defined]
+        now=NOW,
+    )
+    assert problem == "" and "refused" in notice
+    assert bots.by_slug("prospector") is None
+    assert json.loads(spawning_site.api(now=NOW))["drafts"] == []
+
+
+def test_a_post_with_no_decision_decides_nothing(spawning_site: BotsSite, bots: BotStore) -> None:
+    """A missing field must never read as yes — for either write path."""
+    request = _propose(spawning_site, bots)
+    _notice, problem = spawning_site.adopt(
+        {"spawn": [request.id]},  # type: ignore[attr-defined]
+        now=NOW,
+    )
+    assert "activate, draft or refuse" in problem
+    assert bots.by_slug("prospector") is None

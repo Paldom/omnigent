@@ -1,25 +1,40 @@
 /**
  * Bots (`/bots`) — the roster, one bot's channel, and its dock.
  *
- * Follows `plan-2/ui-mock/bots.html`: a roster column that leads with what
- * needs a person, a channel in the middle with pending approvals pinned above
- * the stream, and a right dock over Files / Runs / Setup. The app's own
- * sidebar supplies the nav, so this page is the mock's remaining three
- * columns rather than a second shell.
+ * Follows `plan-2/ui-mock/bots.html`, which draws three states of one section:
+ * the fleet, an owner signature, and a bot another bot asked for. They share a
+ * roster column, so they are sections in it rather than separate routes — a
+ * proposal you have to navigate somewhere else to find is a proposal nobody
+ * reads.
  *
  * Two conventions from the design system, both load-bearing and both easy to
  * lose: status is an 8px disc plus a word in body colour — never coloured
  * text, never a fill behind type, never a border on one side of a card — and
- * there are exactly two type steps, because that is all `index.css` ships.
+ * there are exactly two type steps. The single exception is the amount on a
+ * signature card, which the mock sets at 22px, because the number that commits
+ * money is the one thing on that card you must not misread.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { BotIcon, FileTextIcon, FolderIcon, Loader2Icon, TriangleAlertIcon } from "lucide-react";
 
 import { PageScroll } from "@/components/PageScroll";
 import { Button } from "@/components/ui/button";
-import { useAnswerApproval, useBot, useBots } from "@/hooks/useBots";
-import type { BotApproval, BotDetail, BotStatus, BotSummary } from "@/lib/botsApi";
+import {
+  useAdoptDraft,
+  useAnswerApproval,
+  useBot,
+  useBots,
+  useSignOwnerRequest,
+} from "@/hooks/useBots";
+import type {
+  BotApproval,
+  BotDetail,
+  BotDraft,
+  BotStatus,
+  BotSummary,
+  OwnerRequest,
+} from "@/lib/botsApi";
 import { cn } from "@/lib/utils";
 
 /** Which disc a status gets. Absent ⇒ the hollow "quiet" disc. */
@@ -53,6 +68,17 @@ function ago(at: number): string {
   return `${short(Date.now() / 1000 - at)} ago`;
 }
 
+/**
+ * Elide the middle of a long fingerprint.
+ *
+ * Both ends, never a prefix: a prefix is the part an attacker can grind, and
+ * the point of showing a digest is that a person can compare it to another
+ * one. A 64-character hash wrapped over two lines is a hash nobody checks.
+ */
+function elide(value: string, head = 12, tail = 4): string {
+  return value.length <= head + tail + 1 ? value : `${value.slice(0, head)}…${value.slice(-tail)}`;
+}
+
 /** The line under a bot's name, when there is something worth saying. */
 function reasonFor(bot: BotSummary): string {
   if (bot.pausedReason) return bot.pausedReason;
@@ -80,16 +106,24 @@ function Disc({ status }: { status: BotStatus }) {
   );
 }
 
-function RosterRow({
-  bot,
+/** One roster row. Every section uses this, so they cannot drift apart. */
+function Row({
+  disc,
+  name,
+  suffix,
+  reason,
+  when,
   active,
   onSelect,
 }: {
-  bot: BotSummary;
+  disc: ReactNode;
+  name: string;
+  suffix?: string;
+  reason: string;
+  when: string;
   active: boolean;
   onSelect: () => void;
 }) {
-  const when = bot.dueIn == null ? "—" : bot.dueIn === 0 ? "due" : short(bot.dueIn);
   return (
     <button
       type="button"
@@ -101,7 +135,7 @@ function RosterRow({
         active && "bg-[var(--sidebar-active)]",
       )}
     >
-      <Disc status={bot.status} />
+      {disc}
       <span className="min-w-0">
         <span
           className={cn(
@@ -109,12 +143,34 @@ function RosterRow({
             active && "text-[var(--sidebar-active-foreground)]",
           )}
         >
-          {bot.slug} <span className="text-muted-foreground text-sm">{bot.status}</span>
+          {name} {suffix && <span className="text-muted-foreground text-sm">{suffix}</span>}
         </span>
-        <span className="block truncate text-muted-foreground text-sm">{reasonFor(bot)}</span>
+        <span className="block truncate text-muted-foreground text-sm">{reason}</span>
       </span>
       <span className="font-mono text-muted-foreground text-sm whitespace-nowrap">{when}</span>
     </button>
+  );
+}
+
+function RosterRow({
+  bot,
+  active,
+  onSelect,
+}: {
+  bot: BotSummary;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <Row
+      disc={<Disc status={bot.status} />}
+      name={bot.slug}
+      suffix={bot.status}
+      reason={reasonFor(bot)}
+      when={bot.dueIn == null ? "—" : bot.dueIn === 0 ? "due" : short(bot.dueIn)}
+      active={active}
+      onSelect={onSelect}
+    />
   );
 }
 
@@ -151,14 +207,7 @@ function ApprovalCard({
         <p className="mt-0.5">{approval.question}</p>
 
         {evidence.length > 0 && (
-          <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-sm">
-            {evidence.map(([key, value]) => (
-              <div key={key} className="contents">
-                <dt className="text-muted-foreground">{key}</dt>
-                <dd className="m-0 font-mono break-all">{String(value)}</dd>
-              </div>
-            ))}
-          </dl>
+          <Bindings rows={evidence.map(([key, value]) => [key, String(value)])} />
         )}
 
         {approval.requiresOwner ? (
@@ -192,6 +241,209 @@ function ApprovalCard({
           {approval.runId.slice(0, 8)} · rev {approval.runVersion}
           {approval.expiresAt != null &&
             ` · expires in ${short(approval.expiresAt - Date.now() / 1000)}`}
+        </p>
+      </div>
+    </section>
+  );
+}
+
+/** Key/value evidence, the one shape both cards use to show bindings. */
+function Bindings({ rows }: { rows: [string, string][] }) {
+  return (
+    <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-sm">
+      {rows.map(([key, value]) => (
+        <div key={key} className="contents">
+          <dt className="text-muted-foreground">{key}</dt>
+          <dd className="m-0 font-mono break-all">{value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/**
+ * The signature card for an owner-only verb.
+ *
+ * The one place in the product where a click commits money, so it is the one
+ * place with an explicit affirmation: the button stays disabled until the
+ * person says they are the owner and that they authorise *this* operation. The
+ * digest is on the card because a signature over a fingerprint you were never
+ * shown is a signature over a blank.
+ */
+function OwnerCard({
+  request,
+  canSign,
+  onDecide,
+  busy,
+}: {
+  request: OwnerRequest;
+  canSign: boolean;
+  onDecide: (approved: boolean) => void;
+  busy: boolean;
+}) {
+  const [confirmed, setConfirmed] = useState(false);
+  // A fresh question deserves a fresh affirmation. Without this, a tick that
+  // swapped the pending request underneath a ticked box would carry the
+  // consent from one operation to another.
+  useEffect(() => setConfirmed(false), [request.id]);
+
+  const amount = request.evidence.amount ?? request.evidence.usd;
+  return (
+    <section className="grid grid-cols-[auto_1fr] gap-x-2 rounded-otto-sm border border-border bg-card px-2.5 py-2">
+      <span aria-hidden className="mt-[7px] size-2 shrink-0 rounded-full bg-[var(--status-red)]" />
+      <div className="min-w-0">
+        <h2 className="flex flex-wrap items-baseline gap-1.5 font-medium">
+          Needs your signature
+          <span className="text-muted-foreground text-sm font-normal">· {request.bot}</span>
+        </h2>
+        {amount != null && (
+          <p className="m-0 mt-1.5 text-[22px] leading-tight font-semibold tracking-[-0.01em]">
+            {String(amount)}
+          </p>
+        )}
+        <p className="mt-0.5">{request.question}</p>
+
+        <Bindings
+          rows={[
+            ["verb", request.verb],
+            ...Object.entries(request.evidence)
+              .filter(([key]) => key !== "amount" && key !== "usd")
+              .map(([key, value]) => [key, String(value)] as [string, string]),
+            ["digest", elide(request.digest)],
+            ["policy", request.policyVersion],
+            ["run", `${request.runId.slice(0, 8)} · rev ${request.runVersion}`],
+            [
+              "expires",
+              request.expiresAt == null
+                ? "single use"
+                : `in ${short(request.expiresAt - Date.now() / 1000)} · single use`,
+            ],
+          ]}
+        />
+
+        {canSign ? (
+          <>
+            <label className="mt-3 flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={confirmed}
+                onChange={(event) => setConfirmed(event.target.checked)}
+                className="size-3.5 shrink-0 accent-[var(--primary)]"
+              />
+              <span>I am the owner and I authorise this exact operation.</span>
+            </label>
+            <div className="mt-2.5 flex flex-wrap gap-1.5">
+              <Button size="sm" disabled={!confirmed || busy} onClick={() => onDecide(true)}>
+                Sign and release
+              </Button>
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => onDecide(false)}>
+                Refuse
+              </Button>
+            </div>
+          </>
+        ) : (
+          <p className="mt-2.5 text-muted-foreground text-sm">
+            No <code className="rounded bg-muted px-1 py-px font-mono">ARMY_BROKER_KEY</code> is
+            configured, so nothing here can sign. Owner-only verbs are refused outright rather than
+            quietly permitted — set the key on the control plane and this becomes answerable.
+          </p>
+        )}
+
+        <p className="mt-2 text-muted-foreground text-sm">
+          A free-text reply anywhere, including {request.bot}&rsquo;s own channel, can never satisfy
+          this. The grant is bound by HMAC to the digest above, spent through{" "}
+          <code className="rounded bg-muted px-1 py-px font-mono">used_grants</code> on first use,
+          and worthless afterwards.
+        </p>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * A bot another bot asked for.
+ *
+ * Both halves, never just the first: the rationale is what the parent says it
+ * wants, and the definition is what would actually be created. Approving the
+ * pitch without reading the definition is the whole attack, so the definition
+ * is shown in full and is not collapsed.
+ */
+function DraftCard({
+  draft,
+  onDecide,
+  busy,
+}: {
+  draft: BotDraft;
+  onDecide: (decision: "activate" | "draft" | "refuse") => void;
+  busy: boolean;
+}) {
+  // Rendered as the YAML it will become, one level deep — a nested `wake`
+  // flattened onto one line as raw JSON is the field most worth reading and
+  // the one hardest to read that way.
+  const definition = Object.entries(draft.definition)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) =>
+      value !== null && typeof value === "object" && !Array.isArray(value)
+        ? [
+            `${key}:`,
+            ...Object.entries(value as Record<string, unknown>).map(
+              ([inner, own]) => `  ${inner}: ${String(own)}`,
+            ),
+          ].join("\n")
+        : `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`,
+    )
+    .join("\n");
+
+  return (
+    <section className="grid grid-cols-[auto_1fr] gap-x-2 rounded-otto-sm border border-border bg-card px-2.5 py-2">
+      <span
+        aria-hidden
+        className="mt-[7px] size-2 shrink-0 rounded-full bg-[var(--status-yellow)]"
+      />
+      <div className="min-w-0">
+        <h2 className="flex flex-wrap items-baseline gap-1.5 font-medium">
+          {draft.slug}
+          <span className="text-muted-foreground text-sm font-normal">
+            · proposed by {draft.parent}
+          </span>
+        </h2>
+        <p className="mt-0.5">{draft.rationale}</p>
+
+        <p className="mt-2 text-muted-foreground text-sm">
+          A bot is data, so one the fleet invents at 3am is a row like any other — and it arrives as
+          a proposal. Activation is a human act, which is what makes runaway replication impossible
+          rather than merely discouraged.
+        </p>
+
+        <pre className="mt-2 rounded-otto-sm bg-muted px-2 py-1.5 font-mono text-sm break-words whitespace-pre-wrap">
+          {definition || "(the proposal carried no definition)"}
+        </pre>
+
+        <div className="mt-2.5 flex flex-wrap gap-1.5">
+          <Button size="sm" disabled={busy} onClick={() => onDecide("activate")}>
+            Activate
+          </Button>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => onDecide("draft")}>
+            Keep as draft
+          </Button>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => onDecide("refuse")}>
+            Discard
+          </Button>
+        </div>
+        <p className="mt-2 text-muted-foreground text-sm">
+          Two decisions, not one: saying this bot should exist is separate from switching it on, so
+          approving several proposals in a row has not started several bots.
+        </p>
+
+        <Bindings
+          rows={[
+            ["allowance", `${draft.allowance} iterations carved from ${draft.parent}`],
+            ["proposed", ago(draft.createdAt)],
+          ]}
+        />
+        <p className="mt-2 text-muted-foreground text-sm">
+          The allowance is carved from {draft.parent}&rsquo;s remaining, not added to the pool. A
+          bot cannot create capacity by creating bots; it can only divide what it already had.
         </p>
       </div>
     </section>
@@ -319,30 +571,75 @@ function Dock({
   );
 }
 
+/**
+ * What the middle column is showing.
+ *
+ * Three kinds, because the roster holds three kinds of thing. Keeping them one
+ * union rather than three independent selections is what makes "exactly one
+ * row is highlighted" true by construction.
+ */
+type Selection =
+  { kind: "bot"; slug: string } | { kind: "owner"; id: string } | { kind: "draft"; id: string };
+
+/** The id, when the selection is of that kind. */
+function selectedId(selection: Selection | null, kind: "owner" | "draft"): string | null {
+  return selection?.kind === kind ? selection.id : null;
+}
+
 export function BotsPage() {
   const fleet = useBots();
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selection, setSelection] = useState<Selection | null>(null);
   const [dockTab, setDockTab] = useState<DockTab>("files");
-  const detail = useBot(selected);
-  const answer = useAnswerApproval(selected);
   const [refusal, setRefusal] = useState<string | null>(null);
 
   // Memoised: `?? []` allocates a fresh array on every render, which would
-  // re-run the selection effect and the split on every poll tick.
+  // re-run the selection effect and the splits on every poll tick.
   const rows = useMemo(() => fleet.data?.bots ?? [], [fleet.data]);
+  const owner = useMemo(() => fleet.data?.owner ?? [], [fleet.data]);
+  const drafts = useMemo(() => fleet.data?.drafts ?? [], [fleet.data]);
 
-  // Select whatever needs a person first, then the first row. Re-running only
-  // when the selection is empty keeps a chosen bot chosen while the roster
-  // polls underneath it.
+  const [needsYou, quiet] = useMemo(
+    () => [rows.filter((bot) => bot.needsHuman), rows.filter((bot) => !bot.needsHuman)],
+    [rows],
+  );
+
+  const ownerRequest = owner.find((request) => request.id === selectedId(selection, "owner"));
+  const draft = drafts.find((entry) => entry.id === selectedId(selection, "draft"));
+  // A signature settles a run in the asking bot's channel, so the detail query
+  // follows the owner row too — the dock and the stream stay in step with what
+  // is being decided.
+  const slug = selection?.kind === "bot" ? selection.slug : ownerRequest ? ownerRequest.bot : null;
+
+  const detail = useBot(slug);
+  const answer = useAnswerApproval(slug);
+  const sign = useSignOwnerRequest(slug);
+  const adopt = useAdoptDraft();
+
+  // Open on the most consequential thing waiting: a signature commits money and
+  // is irreversible, a question only gates an iteration, and a proposal creates
+  // nothing until someone says so. Re-running only when nothing is selected
+  // keeps a chosen row chosen while the roster polls underneath it.
   useEffect(() => {
-    if (selected || rows.length === 0) return;
-    setSelected((rows.find((bot) => bot.needsHuman) ?? rows[0]).slug);
-  }, [rows, selected]);
+    if (selection) return;
+    if (owner.length > 0) setSelection({ kind: "owner", id: owner[0].id });
+    else if (needsYou.length > 0) setSelection({ kind: "bot", slug: needsYou[0].slug });
+    else if (drafts.length > 0) setSelection({ kind: "draft", id: drafts[0].id });
+    else if (rows.length > 0) setSelection({ kind: "bot", slug: rows[0].slug });
+  }, [selection, owner, needsYou, drafts, rows]);
 
-  const [needsYou, quiet] = useMemo(() => {
-    const needing = rows.filter((bot) => bot.needsHuman);
-    return [needing, rows.filter((bot) => !bot.needsHuman)];
-  }, [rows]);
+  // A decided row disappears from the roster, and a selection pointing at
+  // nothing renders an empty column. Fall back to whatever is next.
+  useEffect(() => {
+    if (selection?.kind === "owner" && owner.length > 0 && !ownerRequest) setSelection(null);
+    if (selection?.kind === "draft" && !draft) setSelection(null);
+  }, [selection, owner, ownerRequest, draft]);
+
+  async function run(action: () => Promise<{ ok: boolean; reason?: string }>, fallback: string) {
+    setRefusal(null);
+    const result = await action();
+    if (!result.ok) setRefusal(result.reason ?? fallback);
+    else setSelection(null);
+  }
 
   async function handleAnswer(approval: BotApproval, choice: string, approved: boolean) {
     setRefusal(null);
@@ -398,6 +695,32 @@ export function BotsPage() {
           <span className="text-muted-foreground text-sm">{rows.length}</span>
         </div>
 
+        {/* Ordered by consequence, not by kind: a signature moves money and
+            cannot be taken back, a question only gates an iteration, and a
+            proposal has created nothing yet. */}
+        {owner.length > 0 && (
+          <>
+            <p className="px-2 pt-2.5 pb-1 text-muted-foreground text-sm">Owner approvals</p>
+            {owner.map((request) => (
+              <Row
+                key={request.id}
+                disc={
+                  <span
+                    aria-hidden
+                    className="mt-[7px] size-2 shrink-0 rounded-full bg-[var(--status-red)]"
+                  />
+                }
+                name={request.verb.replace(/_/g, " ")}
+                suffix={String(request.evidence.amount ?? request.evidence.usd ?? "")}
+                reason={`${request.bot} · needs your signature`}
+                when={ago(request.createdAt).replace(" ago", "")}
+                active={request.id === selectedId(selection, "owner")}
+                onSelect={() => setSelection({ kind: "owner", id: request.id })}
+              />
+            ))}
+          </>
+        )}
+
         {needsYou.length > 0 && (
           <>
             <p className="px-2 pt-2.5 pb-1 text-muted-foreground text-sm">Needs you</p>
@@ -405,8 +728,31 @@ export function BotsPage() {
               <RosterRow
                 key={bot.slug}
                 bot={bot}
-                active={bot.slug === selected}
-                onSelect={() => setSelected(bot.slug)}
+                active={selection?.kind === "bot" && bot.slug === selection.slug}
+                onSelect={() => setSelection({ kind: "bot", slug: bot.slug })}
+              />
+            ))}
+          </>
+        )}
+
+        {drafts.length > 0 && (
+          <>
+            <p className="px-2 pt-2.5 pb-1 text-muted-foreground text-sm">Draft</p>
+            {drafts.map((entry) => (
+              <Row
+                key={entry.id}
+                disc={
+                  <span
+                    aria-hidden
+                    className="mt-[7px] size-2 shrink-0 rounded-full border-[1.5px] border-[var(--status-yellow)]"
+                  />
+                }
+                name={entry.slug}
+                suffix="draft"
+                reason={`proposed by ${entry.parent}`}
+                when={ago(entry.createdAt).replace(" ago", "")}
+                active={entry.id === selectedId(selection, "draft")}
+                onSelect={() => setSelection({ kind: "draft", id: entry.id })}
               />
             ))}
           </>
@@ -417,8 +763,8 @@ export function BotsPage() {
           <RosterRow
             key={bot.slug}
             bot={bot}
-            active={bot.slug === selected}
-            onSelect={() => setSelected(bot.slug)}
+            active={selection?.kind === "bot" && bot.slug === selection.slug}
+            onSelect={() => setSelection({ kind: "bot", slug: bot.slug })}
           />
         ))}
         {rows.length === 0 && (
@@ -430,28 +776,76 @@ export function BotsPage() {
 
       {/* ── channel ────────────────────────────────────────────── */}
       <div className="flex min-h-0 flex-col">
-        {detail.data && (
-          <>
-            <div className="flex items-baseline gap-2 border-b border-border px-4 py-2.5">
-              <h1 className="font-medium">{detail.data.slug}</h1>
-              <span className="flex items-center gap-1.5 text-muted-foreground text-sm">
+        <div className="flex items-baseline gap-2 border-b border-border px-4 py-2.5">
+          <h1 className="font-medium">
+            {draft ? draft.slug : ownerRequest ? "Owner approvals" : (detail.data?.slug ?? "Bots")}
+          </h1>
+          <span className="flex items-center gap-1.5 text-muted-foreground text-sm">
+            {draft ? (
+              `draft · proposed by ${draft.parent}`
+            ) : ownerRequest ? (
+              "signed channel"
+            ) : detail.data ? (
+              <>
                 <Disc status={detail.data.status} />
                 {detail.data.status.replace(/_/g, " ")}
                 {detail.data.dueIn != null && ` · due in ${short(detail.data.dueIn)}`}
+              </>
+            ) : null}
+          </span>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          {refusal && (
+            <div className="mb-2 rounded-otto-sm border border-[var(--status-red)] bg-card px-2.5 py-2">
+              <span className="flex items-center gap-2">
+                <TriangleAlertIcon className="size-4 shrink-0 text-[var(--status-red)]" />
+                Refused. {refusal}
               </span>
             </div>
+          )}
 
-            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-              {refusal && (
-                <div className="mb-2 rounded-otto-sm border border-[var(--status-red)] bg-card px-2.5 py-2">
-                  <span className="flex items-center gap-2">
-                    <TriangleAlertIcon className="size-4 text-[var(--status-red)]" />
-                    Refused. {refusal}
-                  </span>
-                </div>
-              )}
+          {draft && (
+            <DraftCard
+              draft={draft}
+              busy={adopt.isPending}
+              onDecide={(decision) =>
+                void run(
+                  () => adopt.mutateAsync({ spawn: draft.id, decision }),
+                  "The proposal was not decided.",
+                )
+              }
+            />
+          )}
 
-              {detail.data.pending.length > 0 && (
+          {ownerRequest && (
+            <>
+              <p className="pb-2 text-muted-foreground text-sm">
+                Money verbs never resolve in a bot&rsquo;s channel. The same request appears there
+                with no buttons, and that discontinuity is the capability boundary.
+              </p>
+              <OwnerCard
+                request={ownerRequest}
+                canSign={fleet.data?.canSign ?? false}
+                busy={sign.isPending}
+                onDecide={(approved) =>
+                  void run(
+                    () =>
+                      sign.mutateAsync({
+                        approval: ownerRequest.id,
+                        approved,
+                        confirmed: approved,
+                      }),
+                    "The signature was refused.",
+                  )
+                }
+              />
+            </>
+          )}
+
+          {!draft && detail.data && (
+            <>
+              {detail.data.pending.length > 0 && !ownerRequest && (
                 <>
                   <h2 className="pb-1.5 text-muted-foreground text-sm">Waiting on you</h2>
                   {detail.data.pending.map((approval) => (
@@ -472,14 +866,14 @@ export function BotsPage() {
               ) : (
                 detail.data.channel.map((message) => <ChannelLine key={message.seq} {...message} />)
               )}
-            </div>
-          </>
-        )}
+            </>
+          )}
+        </div>
       </div>
 
       {/* ── dock ───────────────────────────────────────────────── */}
       <div className="hidden min-h-0 xl:block">
-        {detail.data && <Dock bot={detail.data} tab={dockTab} setTab={setDockTab} />}
+        {detail.data && !draft && <Dock bot={detail.data} tab={dockTab} setTab={setDockTab} />}
       </div>
     </div>
   );

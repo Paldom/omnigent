@@ -35,7 +35,7 @@ absence.** Where something is not built, it is refused rather than faked.
 | BOT-09 | Per-bot channel, one thread per run or approval. |
 | BOT-10 / BOT-29 | `approval_requests`, binding action hash + policy version + run version. Only a decision creates a Command. |
 | BOT-12 | Expiry pauses and reports. Never auto-approves. |
-| BOT-30 | The Broker is **constructed**. Owner-only verbs need a signed one-shot grant, or are refused. |
+| BOT-30 | The Broker is **constructed**, and **Owner approvals** in the Bots section is the path that mints a grant — bound to the operation digest, spent through `used_grants`, gated on an explicit owner affirmation. Everywhere else, owner-only verbs are refused. |
 | BOT-31 | The free-text authorisation path is removed for bots. The words are still captured. |
 | BOT-32 | Continuity assembly — persona from the pinned revision, recent outcomes, recent verdicts, unread mail, all bounded. |
 
@@ -59,7 +59,7 @@ absence.** Where something is not built, it is refused rather than faked.
 
 | | |
 |---|---|
-| BOT-21 | **Bots** in the app's main navigation (`/bots`), with a count of what is waiting on you; `army bots serve` for the phone; the CLI for everything. Three carried patches, all list entries — see `FORK-DELTA.md`. |
+| BOT-21 | **Bots** in the app's main navigation (`/bots`), with a count of what is waiting on you: the roster, owner approvals, proposed bots, and one bot's channel and dock — all three of `plan-2/ui-mock/bots.html`'s screens. Plus `army bots serve` for the phone, and the CLI for everything. Three carried patches, all list entries — see `FORK-DELTA.md`. |
 | BOT-22 | The YAML format, versioned, refusing rather than defaulting. |
 | BOT-23 | Reports cite the run that produced them and land in the bot's docs repo. |
 

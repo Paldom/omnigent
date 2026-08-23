@@ -7670,6 +7670,54 @@
         ]
       }
     },
+    "/v1/bots/adopt": {
+      "post": {
+        "description": "Decide a bot that another bot proposed.\n\nActivation is the human act that keeps replication bounded, so it is a\nroute rather than something a tick can do \u2014 and it is two acts, not\none: `draft` creates the bot dormant, `activate` also switches it\non. Anything unrecognised falls through to `refuse`, because the safe\nreading of an unclear instruction about creating a bot is *no*.\n\nThe caps \u2014 depth, fan-out, fleet size, and the allowance carved from\nthe parent \u2014 are enforced in the store, not here.",
+        "operationId": "adopt_v1_bots_adopt_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Adopt V1 Bots Adopt Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Adopt",
+        "tags": [
+          "bots"
+        ]
+      }
+    },
+    "/v1/bots/owner": {
+      "post": {
+        "description": "Answer an owner-only verb \u2014 `spend`, `execute_order`,\n`add_dependency`.\n\nA separate route from the one above rather than a flag on it. These\nare the three operations a bot's channel may never resolve, and the\ncontrol plane mints a one-shot grant bound to the operation digest\nbefore it will record one. Sharing a handler would mean one missing\nfield is the difference between the two authorities.\n\n`confirmed` must be explicitly true: the grant is a signature, and a\nsignature nobody actively gave is the failure this path exists to\nprevent.",
+        "operationId": "sign_v1_bots_owner_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Sign V1 Bots Owner Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Sign",
+        "tags": [
+          "bots"
+        ]
+      }
+    },
     "/v1/bots/verdict": {
       "post": {
         "description": "Answer a question, through the control plane's own bound path.\n\nDeliberately a forward rather than a reimplementation. The bindings \u2014\naction hash, policy version, run version \u2014 are checked once, in the\nplace that owns them, so this page cannot become a softer route to a\nverdict than the CLI.",
