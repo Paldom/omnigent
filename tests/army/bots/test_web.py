@@ -871,3 +871,53 @@ def test_a_run_carries_the_session_it_ran_in(site: BotsSite, bots: BotStore) -> 
 
     payload = json.loads(site.bot_json("scout", now=NOW) or "{}")
     assert payload["runs"][0]["session_id"] == "conv_abc123"
+
+
+# ── lineage ───────────────────────────────────────────────────────
+#
+# parent_bot_id, root_bot_id and depth have been columns since the first
+# release and nothing rendered them, so the caps that bound replication were
+# invisible at the moment they matter: deciding whether to adopt one more bot.
+
+
+def test_a_bot_nobody_spawned_has_an_empty_chain(spawning_site: BotsSite, bots: BotStore) -> None:
+    activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    lineage = json.loads(spawning_site.bot_json("scout", now=NOW) or "{}")["lineage"]
+    assert lineage["parent"] is None
+    assert lineage["children"] == []
+    assert lineage["cascades"] is False
+
+
+def test_the_chain_names_the_parent_and_the_children(
+    spawning_site: BotsSite, bots: BotStore
+) -> None:
+    request = _propose(spawning_site, bots)
+    spawning_site.adopt(
+        {"spawn": [request.id], "decision": ["activate"]},  # type: ignore[attr-defined]
+        now=NOW,
+    )
+
+    parent = json.loads(spawning_site.bot_json("scout", now=NOW) or "{}")["lineage"]
+    assert [entry["slug"] for entry in parent["children"]] == ["prospector"]
+    # Retiring scout would take prospector with it, which is the one action
+    # here with a blast radius larger than the row you clicked.
+    assert parent["cascades"] is True
+    # 100 granted, 30 carved.
+    assert parent["children"][0]["remaining"] == 30
+
+    child = json.loads(spawning_site.bot_json("prospector", now=NOW) or "{}")["lineage"]
+    assert child["parent"]["slug"] == "scout"
+    assert child["depth"] == 1
+    assert child["cascades"] is False
+
+
+def test_a_bot_is_not_its_own_sibling(spawning_site: BotsSite, bots: BotStore) -> None:
+    """ "1 of 3 children under scout" is the fan-out number; counting yourself
+    in it reads as one more sibling than exists."""
+    request = _propose(spawning_site, bots)
+    spawning_site.adopt(
+        {"spawn": [request.id], "decision": ["activate"]},  # type: ignore[attr-defined]
+        now=NOW,
+    )
+    child = json.loads(spawning_site.bot_json("prospector", now=NOW) or "{}")["lineage"]
+    assert child["siblings"] == []

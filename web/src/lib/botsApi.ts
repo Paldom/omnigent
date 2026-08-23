@@ -107,6 +107,34 @@ export interface WorkspaceView {
   reason: string | null;
 }
 
+/** One bot in another's chain. */
+export interface Relative {
+  slug: string;
+  status: BotStatus;
+  depth: number;
+  /** Iterations left in its own allowance, or `null` when it has no budget. */
+  remaining: number | null;
+}
+
+/**
+ * Who a bot came from and what came from it.
+ *
+ * The chain has always been in the data — `parent_bot_id`, `root_bot_id` and
+ * `depth` are columns — and nothing rendered it, so the caps that bound
+ * replication were invisible at the moment they matter: deciding whether to
+ * adopt one more bot.
+ */
+export interface Lineage {
+  depth: number;
+  maxDepth: number;
+  maxFanout: number;
+  parent: Relative | null;
+  siblings: Relative[];
+  children: Relative[];
+  /** Whether retiring this bot would take others with it. */
+  cascades: boolean;
+}
+
 /** One line in a bot's channel. */
 export interface BotMessage {
   seq: number;
@@ -134,6 +162,7 @@ export interface BotDetail {
   pausedReason: string | null;
   workspace: string | null;
   browserProfile: string | null;
+  lineage: Lineage;
   runs: BotRun[];
   channel: BotMessage[];
   pending: BotApproval[];
@@ -247,6 +276,27 @@ function toApproval(row: any): BotApproval {
   };
 }
 
+function toRelative(row: any): Relative {
+  return {
+    slug: row.slug,
+    status: row.status,
+    depth: row.depth,
+    remaining: row.remaining ?? null,
+  };
+}
+
+function toLineage(row: any): Lineage {
+  return {
+    depth: row?.depth ?? 0,
+    maxDepth: row?.max_depth ?? 2,
+    maxFanout: row?.max_fanout ?? 3,
+    parent: row?.parent ? toRelative(row.parent) : null,
+    siblings: (row?.siblings ?? []).map(toRelative),
+    children: (row?.children ?? []).map(toRelative),
+    cascades: Boolean(row?.cascades),
+  };
+}
+
 function toOwner(row: any): OwnerRequest {
   return {
     id: row.id,
@@ -325,6 +375,7 @@ export async function getBot(
     pausedReason: body.paused_reason ?? null,
     workspace: body.workspace ?? null,
     browserProfile: body.browser_profile ?? null,
+    lineage: toLineage(body.lineage),
     runs: (body.runs ?? []).map((row: any) => ({
       id: row.id,
       state: row.state,

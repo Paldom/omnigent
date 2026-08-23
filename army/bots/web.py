@@ -29,7 +29,7 @@ from urllib.parse import parse_qs, urlparse
 from army.bots.approvals import ApprovalRefused, ApprovalStore
 from army.bots.budget import BudgetExhausted
 from army.bots.messages import MessageKind, MessageStore
-from army.bots.model import BotStatus, DerivedStatus
+from army.bots.model import MAX_DEPTH, MAX_FANOUT, BotStatus, DerivedStatus
 from army.bots.roster import RosterEntry, roster, summarise
 from army.bots.schedule import first_wake
 from army.bots.spawn import SpawnRefused
@@ -662,6 +662,49 @@ class BotsSite:
             return "", str(exc)
         return f"{bot.slug} is active, with {request.allowance} iterations.", ""
 
+    def _lineage_json(self, bot: Any) -> dict[str, Any]:
+        """
+        Who this bot came from and what came from it.
+
+        The chain is already in the data — ``parent_bot_id``, ``root_bot_id``
+        and ``depth`` have been columns since the first release — and nothing
+        rendered it, so the caps that bound replication were invisible at
+        exactly the moment they matter: when you are deciding whether to adopt
+        one more bot.
+
+        Budget is the one that actually bites, so it is reported rather than
+        described: a child's allowance is carved out of its parent's remaining,
+        not added to the pool.
+        """
+        parent = self.bots.get(bot.parent_bot_id) if bot.parent_bot_id else None
+        siblings = self.bots.children(parent.id) if parent else []
+        children = self.bots.children(bot.id)
+
+        def brief(entry: Any) -> dict[str, Any]:
+            account = self.budgets.account(entry.id) if self.budgets is not None else None
+            return {
+                "slug": entry.slug,
+                "status": entry.status.value,
+                "depth": entry.depth,
+                "remaining": account.remaining if account else None,
+            }
+
+        return {
+            "depth": bot.depth,
+            "max_depth": MAX_DEPTH,
+            "max_fanout": MAX_FANOUT,
+            "parent": brief(parent) if parent else None,
+            # Excluding itself: "1 of 3 children under scout" is the number the
+            # fan-out cap is about, and counting yourself in it reads as one
+            # more sibling than exists.
+            "siblings": [brief(entry) for entry in siblings if entry.id != bot.id],
+            "children": [brief(entry) for entry in children],
+            # Retiring a parent retires everything below it. Worth saying on
+            # the page, because it is the one action here with a blast radius
+            # larger than the row you clicked.
+            "cascades": bool(children),
+        }
+
     def files_json(self, slug: str, *, path: str, read: bool) -> str | None:
         """
         List a directory in a bot's workspace, or read one file out of it.
@@ -778,6 +821,7 @@ class BotsSite:
                 "paused_reason": bot.paused_reason,
                 "workspace": bot.workspace,
                 "browser_profile": bot.browser_profile,
+                "lineage": self._lineage_json(bot),
                 "revision": bot.current_revision_id,
                 "runs": [
                     {

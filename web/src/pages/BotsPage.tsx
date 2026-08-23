@@ -44,7 +44,9 @@ import type {
   BotDraft,
   BotStatus,
   BotSummary,
+  Lineage,
   OwnerRequest,
+  Relative,
 } from "@/lib/botsApi";
 import { cn } from "@/lib/utils";
 
@@ -58,11 +60,12 @@ const DISC: Partial<Record<BotStatus, string>> = {
   due: "bg-[var(--status-yellow)]",
 };
 
-type DockTab = "files" | "runs" | "setup";
+type DockTab = "files" | "runs" | "lineage" | "setup";
 
 const DOCK_TABS: { value: DockTab; label: string }[] = [
   { value: "files", label: "Files" },
   { value: "runs", label: "Runs" },
+  { value: "lineage", label: "Lineage" },
   { value: "setup", label: "Setup" },
 ];
 
@@ -611,14 +614,93 @@ function WorkspaceBrowser({ slug, workspace }: { slug: string; workspace: string
   );
 }
 
+/**
+ * Who a bot came from and what came from it.
+ *
+ * The chain was already in the data and nothing showed it, so the caps that
+ * make replication bounded were invisible exactly when they matter — when you
+ * are looking at a proposal and deciding whether to adopt one more bot.
+ *
+ * Rendered as a chain rather than a table: depth is the cap that stops this
+ * going three levels deep, and a list of names does not show depth.
+ */
+function LineagePanel({
+  lineage,
+  onSelect,
+}: {
+  lineage: Lineage;
+  onSelect: (slug: string) => void;
+}) {
+  const relative = (entry: Relative, indent: number, note?: string) => (
+    <button
+      key={entry.slug}
+      type="button"
+      onClick={() => onSelect(entry.slug)}
+      style={{ paddingLeft: `${4 + indent * 14}px` }}
+      className="flex w-full items-baseline gap-2 rounded-otto-sm py-1 pr-1 text-left hover:bg-muted"
+    >
+      {indent > 0 && <span className="text-muted-foreground">↳</span>}
+      <span className="truncate">{entry.slug}</span>
+      <span className="truncate text-muted-foreground text-sm">
+        {note ?? entry.status.replace(/_/g, " ")}
+      </span>
+      {entry.remaining != null && (
+        <span className="ml-auto shrink-0 font-mono text-muted-foreground text-sm">
+          {entry.remaining} left
+        </span>
+      )}
+    </button>
+  );
+
+  const alone = !lineage.parent && lineage.children.length === 0;
+  return (
+    <>
+      {alone ? (
+        <p className="text-muted-foreground text-sm">
+          Nothing depends on this bot and it depends on nothing. A person created it directly.
+        </p>
+      ) : (
+        <>
+          {lineage.parent && relative(lineage.parent, 0, "parent")}
+          {lineage.siblings.map((entry) => relative(entry, 1, "sibling"))}
+          {lineage.children.map((entry) => relative(entry, lineage.parent ? 2 : 1))}
+        </>
+      )}
+
+      <Bindings
+        rows={[
+          [
+            "depth",
+            `${lineage.depth} of ${lineage.maxDepth}` +
+              (lineage.depth >= lineage.maxDepth ? " — it cannot spawn again" : ""),
+          ],
+          [
+            "fan-out",
+            `${lineage.children.length} of ${lineage.maxFanout}` +
+              (lineage.parent ? ` under ${lineage.parent.slug}` : ""),
+          ],
+        ]}
+      />
+
+      <p className="mt-2.5 text-muted-foreground text-sm">
+        {lineage.cascades
+          ? `Retiring this retires its ${lineage.children.length === 1 ? "child" : `${lineage.children.length} children`} too — the one action here with a blast radius larger than the row you clicked.`
+          : "A child's allowance is carved from its parent's remaining, not added to the pool. A bot cannot create capacity by creating bots."}
+      </p>
+    </>
+  );
+}
+
 function Dock({
   bot,
   tab,
   setTab,
+  onSelect,
 }: {
   bot: BotDetail;
   tab: DockTab;
   setTab: (tab: DockTab) => void;
+  onSelect: (slug: string) => void;
 }) {
   // The tab lives on the page, not here. Owning it locally meant the operator's
   // choice was lost every time the poll briefly cleared `detail.data` and this
@@ -690,6 +772,8 @@ function Dock({
               </p>
             </>
           )}
+
+          {tab === "lineage" && <LineagePanel lineage={bot.lineage} onSelect={onSelect} />}
 
           {tab === "setup" && (
             <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
@@ -1057,7 +1141,14 @@ export function BotsPage() {
       {/* ── dock ───────────────────────────────────────────────── */}
       <div className="hidden min-h-0 flex-col border-l border-border xl:flex">
         <TopBand />
-        {detail.data && !draft && <Dock bot={detail.data} tab={dockTab} setTab={setDockTab} />}
+        {detail.data && !draft && (
+          <Dock
+            bot={detail.data}
+            tab={dockTab}
+            setTab={setDockTab}
+            onSelect={(target) => setSelection({ kind: "bot", slug: target })}
+          />
+        )}
       </div>
     </div>
   );

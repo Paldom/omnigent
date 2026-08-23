@@ -85,6 +85,15 @@ function detail(overrides: Record<string, unknown> = {}) {
     pausedReason: null,
     workspace: null,
     browserProfile: null,
+    lineage: {
+      depth: 0,
+      maxDepth: 2,
+      maxFanout: 3,
+      parent: null,
+      siblings: [],
+      children: [],
+      cascades: false,
+    },
     runs: [],
     channel: [],
     pending: [approval()],
@@ -430,6 +439,59 @@ describe("BotsPage", () => {
     renderPage();
     await screen.findByText("Watch the eval set");
     expect(screen.queryByRole("link", { name: "Open session" })).not.toBeInTheDocument();
+  });
+
+  it("shows the chain a bot sits in, and the caps that bound it", async () => {
+    getBot.mockResolvedValue(
+      detail({
+        pending: [],
+        lineage: {
+          depth: 1,
+          maxDepth: 2,
+          maxFanout: 3,
+          parent: { slug: "scout", status: "running", depth: 0, remaining: 63 },
+          siblings: [{ slug: "sibling-a", status: "scheduled", depth: 1, remaining: 10 }],
+          children: [{ slug: "grandchild", status: "manual", depth: 2, remaining: 5 }],
+          cascades: true,
+        },
+      }),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Lineage" }));
+
+    expect(await screen.findByText("parent")).toBeInTheDocument();
+    expect(screen.getByText("grandchild")).toBeInTheDocument();
+    expect(screen.getByText("sibling")).toBeInTheDocument();
+    expect(screen.getByText(/1 of 2/)).toBeInTheDocument();
+    // The one action with a blast radius larger than the row you clicked.
+    expect(screen.getByText(/Retiring this retires its child/)).toBeInTheDocument();
+  });
+
+  it("says a bot at the depth cap cannot spawn again", async () => {
+    getBot.mockResolvedValue(
+      detail({
+        pending: [],
+        lineage: {
+          depth: 2,
+          maxDepth: 2,
+          maxFanout: 3,
+          parent: { slug: "scout", status: "running", depth: 1, remaining: 5 },
+          siblings: [],
+          children: [],
+          cascades: false,
+        },
+      }),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Lineage" }));
+    expect(await screen.findByText(/it cannot spawn again/)).toBeInTheDocument();
+  });
+
+  it("says plainly when a bot is in no chain at all", async () => {
+    getBot.mockResolvedValue(detail({ pending: [] }));
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Lineage" }));
+    expect(await screen.findByText(/A person created it directly/)).toBeInTheDocument();
   });
 
   it("says why the system paused a bot, where the roster shows it", async () => {
