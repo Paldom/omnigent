@@ -363,9 +363,12 @@ class BotSupervisor(Supervisor):
             # The only backstop against a poison mission: a bot that reports
             # work done every time has no idle streak to back it off. Pause and
             # say so — a silent stall looks exactly like a bot that is working.
+            # Rewritten with the slug: `charge` only knows the id, and an
+            # operator reading their own channel should not have to look one up.
+            reason = f"budget exhausted — refill it with `army bots budget {bot.slug} --grant N`"
             _logger.warning("bot %s: %s", bot.slug, exc)
-            self._pause(bot, now=now, reason=str(exc))
-            self._say(bot, f"Paused: {exc}", now=now)
+            self._pause(bot, now=now, reason=reason)
+            self._say(bot, f"Paused: {reason}", now=now)
             return None
         except ConcurrentTransition:
             # The live-run check above raced something — another tick, or the

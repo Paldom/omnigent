@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from army.bots.approvals import ApprovalRefused, ApprovalStore, owner_broker
+from army.bots.budget import BudgetExhausted, BudgetStore
 from army.bots.definition import EXAMPLE, InvalidDefinition, load_file, to_bot, to_yaml
 from army.bots.messages import MessageKind, MessageStore
 from army.bots.model import Bot, BotStatus, DerivedStatus, IllegalBotMove
@@ -25,9 +26,11 @@ from army.bots.precondition import PreconditionRegistry
 from army.bots.registry import WorkloadRegistry
 from army.bots.roster import RosterEntry, roster, summarise
 from army.bots.schedule import first_wake
+from army.bots.spawn import SpawnRefused, SpawnStore
 from army.bots.store import BotStore
 from army.bots.supervisor import BotSupervisor, wake_now
 from army.bots.web import BotsSite, serve
+from army.bots.workspace import Workspace
 from army.config import Config
 from army.gates import GateRefused, Grant
 from army.lanes import Lanes
@@ -74,6 +77,7 @@ def _fleet(config: Config) -> tuple[Store, BotStore, BotSupervisor]:
         max_concurrent_runs=config.max_concurrent_runs,
         messages=MessageStore(bots),
         approvals=ApprovalStore(bots, owner_broker(bots)),
+        budgets=BudgetStore(bots),
     )
     return store, bots, supervisor
 
@@ -437,6 +441,135 @@ def cmd_run(config: Config, args: argparse.Namespace) -> int:
             return 0
 
 
+def cmd_proposals(config: Config, _args: argparse.Namespace) -> int:
+    """
+    Show bots that other bots have asked for.
+
+    :param config: Resolved configuration.
+    :param _args: Unused; the subcommand takes no options.
+    :returns: Process exit code.
+    """
+    _, bots = _open(config)
+    spawns = SpawnStore(bots, BudgetStore(bots))
+    pending = spawns.pending()
+    if not pending:
+        print("no bots have been proposed")
+        return 0
+    for request in pending:
+        parent = bots.get(request.parent_bot_id)
+        print(
+            f"{request.id[:12]}  {request.slug:<16}"
+            f"proposed by {parent.slug if parent else request.parent_bot_id[:12]}"
+            f" · {request.allowance} iterations"
+        )
+        print(f"{'':14}{request.rationale}")
+        print(f"{'':14}army bots adopt {request.id[:12]}   |   army bots refuse {request.id[:12]}")
+    return 0
+
+
+def cmd_adopt(config: Config, args: argparse.Namespace) -> int:
+    """
+    Turn a bot's proposal into a real bot, in ``DRAFT``.
+
+    :param config: Resolved configuration.
+    :param args: Uses ``proposal`` and ``--allowance``.
+    :returns: Process exit code.
+    """
+    _, bots = _open(config)
+    spawns = SpawnStore(bots, BudgetStore(bots))
+    request = spawns.get(args.proposal)
+    if request is None:
+        print(f"no proposal matching {args.proposal!r}", file=sys.stderr)
+        return 1
+    try:
+        child = spawns.activate(
+            request,
+            decided_by=f"human:{_whoami()}",
+            now=int(time.time()),
+            allowance=args.allowance,
+        )
+    except (SpawnRefused, BudgetExhausted) as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
+    print(f"created {child.slug} ({child.id[:12]}) as draft at depth {child.depth}")
+    print(f"  army bots activate {child.slug}")
+    return 0
+
+
+def cmd_refuse(config: Config, args: argparse.Namespace) -> int:
+    """
+    Turn a proposal down, with a reason the bot can read.
+
+    :param config: Resolved configuration.
+    :param args: Uses ``proposal`` and ``--because``.
+    :returns: Process exit code.
+    """
+    _, bots = _open(config)
+    spawns = SpawnStore(bots, BudgetStore(bots))
+    request = spawns.get(args.proposal)
+    if request is None:
+        print(f"no proposal matching {args.proposal!r}", file=sys.stderr)
+        return 1
+    spawns.refuse(
+        request, decided_by=f"human:{_whoami()}", because=args.because, now=int(time.time())
+    )
+    print(f"refused {request.slug}: {args.because}")
+    return 0
+
+
+def cmd_budget(config: Config, args: argparse.Namespace) -> int:
+    """
+    Show or set what a bot may spend.
+
+    :param config: Resolved configuration.
+    :param args: Uses ``bot`` and ``--grant``.
+    :returns: Process exit code.
+    """
+    _, bots = _open(config)
+    budgets = BudgetStore(bots)
+    bot = _resolve(bots, args.bot)
+    if bot is None:
+        return 1
+    if args.grant is not None:
+        budgets.grant(bot.id, args.grant)
+        print(f"{bot.slug} may run {args.grant} more iterations")
+        return 0
+    account = budgets.account(bot.id)
+    if account is None:
+        print(f"{bot.slug} has no budget, so nothing bounds it but its own idle streak")
+        print(f"  army bots budget {bot.slug} --grant 100")
+    else:
+        print(
+            f"{bot.slug}: {account.remaining} of {account.allowance} left"
+            f" ({account.spent} spent, {account.reserved} reserved for children)"
+        )
+    for entry in budgets.usage(bot.id, limit=args.limit):
+        print(f"  {_ago(int(entry['at'])):>10}  {entry['delta']:+d}  {entry['reason']}")
+    return 0
+
+
+def cmd_workspace(config: Config, args: argparse.Namespace) -> int:
+    """
+    Create a bot's directory and seed its charter and runbook.
+
+    :param config: Resolved configuration.
+    :param args: Uses ``bot``, ``--root`` and ``--from-repo``.
+    :returns: Process exit code.
+    """
+    _, bots = _open(config)
+    bot = _resolve(bots, args.bot)
+    if bot is None:
+        return 1
+    workspace = Workspace(bots, root=args.root) if args.root else Workspace(bots)
+    path = workspace.prepare(
+        bot, now=int(time.time()), source_repo=Path(args.from_repo) if args.from_repo else None
+    )
+    print(f"{bot.slug}: {path}")
+    for doc in workspace.docs(bot):
+        print(f"  {doc.kind.value:<10}{doc.path}")
+    return 0
+
+
 def cmd_serve(config: Config, args: argparse.Namespace) -> int:
     """
     Serve the Bots page from this process.
@@ -601,6 +734,39 @@ def add_parser(sub: argparse._SubParsersAction, common: argparse.ArgumentParser)
             "add_dependency — a channel verdict alone never satisfies those",
         )
         verdict.set_defaults(func=cmd_verdict)
+
+    proposals = inner.add_parser(
+        "proposals", help="bots that other bots have asked for", parents=[common]
+    )
+    proposals.set_defaults(func=cmd_proposals)
+
+    adopt = inner.add_parser("adopt", help="create a proposed bot, as a draft", parents=[common])
+    adopt.add_argument("proposal", help="proposal id or prefix")
+    adopt.add_argument(
+        "--allowance",
+        type=int,
+        help="iterations to carve from the parent, overriding what it asked for",
+    )
+    adopt.set_defaults(func=cmd_adopt)
+
+    refuse = inner.add_parser("refuse", help="turn a proposal down", parents=[common])
+    refuse.add_argument("proposal", help="proposal id or prefix")
+    refuse.add_argument("--because", default="not needed", help="a reason the bot can read")
+    refuse.set_defaults(func=cmd_refuse)
+
+    budget = inner.add_parser("budget", help="what a bot may spend", parents=[common])
+    budget.add_argument("bot", help="slug or id prefix")
+    budget.add_argument("--grant", type=int, help="set the allowance, in iterations")
+    budget.add_argument("--limit", type=int, default=10)
+    budget.set_defaults(func=cmd_budget)
+
+    workspace = inner.add_parser(
+        "workspace", help="create a bot's directory and docs", parents=[common]
+    )
+    workspace.add_argument("bot", help="slug or id prefix")
+    workspace.add_argument("--root", type=Path, help="where bot directories live")
+    workspace.add_argument("--from-repo", help="repository to add a worktree from")
+    workspace.set_defaults(func=cmd_workspace)
 
     site = inner.add_parser("serve", help="serve the Bots page", parents=[common])
     site.add_argument(
