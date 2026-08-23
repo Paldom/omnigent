@@ -7,7 +7,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BotsPage } from "./BotsPage";
@@ -138,11 +138,12 @@ function fleet(overrides: Record<string, unknown> = {}) {
 
 function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  render(
     <QueryClientProvider client={client}>
       <BotsPage />
     </QueryClientProvider>,
   );
+  return client;
 }
 
 beforeEach(() => {
@@ -340,6 +341,29 @@ describe("BotsPage", () => {
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Activate" }));
     expect(await screen.findByText(/already has 3 children/)).toBeInTheDocument();
+  });
+
+  it("moves on when the selected row disappears underneath it", async () => {
+    // The roster polls, so a row can vanish without this page having done
+    // anything — someone answered from the CLI, or a tick expired it. A
+    // selection left pointing at it renders an empty middle column, which
+    // reads as the page having broken rather than as the work being done.
+    listBots.mockResolvedValue(
+      fleet({
+        bots: [bot("scout", { status: "waiting_human", needsHuman: true })],
+        owner: [ownerRequest()],
+      }),
+    );
+    const client = renderPage();
+    await screen.findByText("Needs your signature");
+
+    listBots.mockResolvedValue(
+      fleet({ bots: [bot("scout", { status: "waiting_human", needsHuman: true })] }),
+    );
+    await act(() => client.invalidateQueries({ queryKey: ["bots"] }));
+
+    expect(await screen.findByText("Merge the candidate patch?")).toBeInTheDocument();
+    expect(screen.queryByText("Needs your signature")).not.toBeInTheDocument();
   });
 
   it("says why the system paused a bot, where the roster shows it", async () => {

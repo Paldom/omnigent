@@ -1,29 +1,37 @@
 /**
- * Records a walkthrough of the Bots web surface.
+ * Records a walkthrough of the Bots section, inside the Omnigent app.
  *
- * Everything on screen is real: a live server, a real SQLite file, real
- * approvals answered through the same bound path the CLI uses. The only thing
- * added is the caption strip, injected as an overlay so the narration sits
- * beside the product rather than replacing it.
+ * Everything on screen is real: a live Omnigent server, a live control plane
+ * in its own process, a real SQLite file, and approvals answered through the
+ * same bound path the CLI uses. The only addition is the caption strip,
+ * injected as an overlay so the narration sits beside the product rather than
+ * replacing it.
+ *
+ * Usage:
+ *   node walkthrough.mjs <app-url> <out-dir>
+ *
+ * `PLAYWRIGHT_CHROME` must point at a full Chromium — the headless shell
+ * cannot record video. `ARMY_CONFIG` points at the control plane's config, so
+ * the recording can drive a real tick from a second process mid-take.
  */
 import { execFileSync } from "node:child_process";
-import pkg from "playwright-core";
-const { chromium } = pkg;
+import { createRequire } from "node:module";
 
-const TOKEN = process.argv[2];
-const PORT = process.argv[3];
-const OUT = process.argv[4];
-const BASE = `http://127.0.0.1:${PORT}`;
+// playwright-core is not a dependency of this repo; the recording is a
+// developer tool, not part of the build. Resolve whatever is installed.
+const require = createRequire(import.meta.url);
+const { chromium } = require(process.env.PLAYWRIGHT_CORE || "playwright-core");
 
-// A full Chromium, not the headless shell: the shell cannot record video.
-// PLAYWRIGHT_CHROME points at one when the default resolution does not work.
+const BASE = process.argv[2] || "http://localhost:5199";
+const OUT = process.argv[3] || "/tmp/demo/video";
+
 const browser = await chromium.launch({
   executablePath: process.env.PLAYWRIGHT_CHROME || undefined,
 });
 const context = await browser.newContext({
-  viewport: { width: 1280, height: 860 },
+  viewport: { width: 1440, height: 900 },
   deviceScaleFactor: 2,
-  recordVideo: { dir: OUT, size: { width: 1280, height: 860 } },
+  recordVideo: { dir: OUT, size: { width: 1440, height: 900 } },
 });
 const page = await context.newPage();
 
@@ -39,7 +47,7 @@ const CAPTION_CSS = `
 #wt em{font-style:normal;color:#ffffffb8}
 `;
 
-/** Put the caption strip on whatever page is loaded. */
+/** Put the caption strip on the page. Survives client-side routing. */
 async function mount() {
   await page.addStyleTag({ content: CAPTION_CSS });
   await page.evaluate(() => {
@@ -50,7 +58,7 @@ async function mount() {
   });
 }
 
-/** Show a caption, hold it, and optionally keep it up for the next step. */
+/** Show a caption and hold it. */
 async function say(kicker, text, hold = 3400) {
   await page.evaluate(
     ([k, t]) => {
@@ -68,54 +76,92 @@ async function hide() {
   await page.waitForTimeout(400);
 }
 
-/** Scroll smoothly so the recording reads as a person looking down a page. */
-async function glide(to, ms = 1400) {
-  await page.evaluate(
-    ([target, duration]) => {
-      const start = window.scrollY;
-      const delta = target - start;
-      const t0 = performance.now();
-      return new Promise((done) => {
-        function step(t) {
-          const p = Math.min(1, (t - t0) / duration);
-          const e = 1 - Math.pow(1 - p, 3);
-          window.scrollTo(0, start + delta * e);
-          p < 1 ? requestAnimationFrame(step) : done();
-        }
-        requestAnimationFrame(step);
-      });
-    },
-    [to, ms],
+/** Click a roster row by its visible name, and let the columns settle. */
+async function select(name) {
+  await page.getByRole("button", { name }).first().click();
+  await page.waitForTimeout(1100);
+}
+
+/** A real tick, from a second process, against the same file the page reads. */
+function tick() {
+  if (!process.env.ARMY_CONFIG) return;
+  execFileSync(
+    "uv",
+    // prettier-ignore
+    ["run", "--frozen", "python", "-m", "army", "bots", "run", "--once", "--offline",
+      "--config", process.env.ARMY_CONFIG],
+    { stdio: "ignore" },
   );
 }
 
-async function visit(path) {
-  await page.goto(`${BASE}${path}${path.includes("?") ? "&" : "?"}token=${TOKEN}`);
-  await mount();
-  await page.waitForTimeout(500);
-}
+// ── 1. the section ──────────────────────────────────────────────
+await page.goto(`${BASE}/bots`, { waitUntil: "networkidle" });
+await page.waitForTimeout(2500);
+await mount();
 
-// ── 1. the fleet ────────────────────────────────────────────────
-await visit("/bots");
 await say(
   "Omnigent · Bot mode",
   "Long-running bots that own no process between iterations. A bot is data; a body is disposable.",
   4200,
 );
 await say(
+  "A section, not a second app",
+  "The app's own sidebar, its own session, its own shortcuts — and a count on the nav row, which is " +
+    "how you find out a bot is waiting on you while you are doing something else.",
+  5000,
+);
+await say(
   "The roster",
-  "Nine bots, nine operational statuses — none of them stored. Every one is computed from the runs, " +
+  "Nine bots in nine operational statuses, none of them stored. Every one is computed from the runs, " +
     "the vendor gates and the clock, so it cannot disagree with what is actually happening.",
-  5200,
+  5400,
 );
 await say(
   "Ordered by consequence",
-  "What needs a person is at the top. The question the roster exists to answer at a glance is " +
-    "<em>which one is stuck?</em>",
-  4200,
+  "A signature moves money and cannot be taken back. A question only gates an iteration. A proposal " +
+    "has created nothing yet. That is the order.",
+  4600,
 );
 
-// ── 2. the approval ─────────────────────────────────────────────
+// ── 2. the owner signature ──────────────────────────────────────
+await say(
+  "Owner approvals",
+  "<em>spend</em>, <em>execute_order</em> and <em>add_dependency</em> are ALWAYS_OWNER. treasurer " +
+    "asked for forty dollars and its own channel cannot answer — the card there has no buttons at all.",
+  5600,
+);
+await say(
+  "Bound, not merely asked",
+  "The digest is what the grant is signed over, so it is on the card. A signature over a fingerprint " +
+    "you were never shown is a signature over a blank.",
+  5200,
+);
+await hide();
+await page.getByRole("checkbox").click();
+await page.waitForTimeout(900);
+await mount();
+await say(
+  "The affirmation is the signature",
+  "The button is disabled until you say you are the owner and that you authorise <em>this</em> " +
+    "operation. What guards this is not the checkbox — it is that the signing key is in an " +
+    "environment a bot's sandbox does not get.",
+  6000,
+);
+await hide();
+await page.getByRole("button", { name: "Sign and release" }).click();
+await page.waitForTimeout(2200);
+await mount();
+await say(
+  "Minted, spent, gone",
+  "One grant, bound by HMAC to that digest, recorded in <em>used_grants</em> in the same transaction " +
+    "as the verdict. The same approval cannot pay twice.",
+  5200,
+);
+await hide();
+
+// ── 3. an ordinary question ─────────────────────────────────────
+await select(/^harvester/);
+await mount();
 await say(
   "An approval is a row",
   "harvester finished an iteration and is waiting. The run holds no session, no process and no " +
@@ -123,23 +169,14 @@ await say(
   5000,
 );
 await say(
-  "Bound, not merely asked",
-  "The card shows what the verdict is bound to: the verb, the evidence, and the action hash. " +
-    "A human bound to arguments they were never shown is not bound to anything.",
-  5400,
+  "What the verdict is bound to",
+  "The action hash, the policy version, the run version. A verdict that no longer matches its " +
+    "question re-asks rather than being honoured.",
+  5000,
 );
 await hide();
-await page.hover("text=continue");
-await page.waitForTimeout(700);
-await say(
-  "Answering",
-  "The same bound path the CLI uses. A verdict that no longer matches its question re-asks rather " +
-    "than being honoured.",
-  3800,
-);
-await hide();
-await page.click("text=continue");
-await page.waitForTimeout(900);
+await page.getByRole("button", { name: "continue" }).first().click();
+await page.waitForTimeout(1600);
 await mount();
 await say(
   "Recorded, not applied",
@@ -147,66 +184,61 @@ await say(
     "next tick — so answering while nothing is running is normal.",
   5000,
 );
-
-// A real tick, from a second process, against the same SQLite file the page is
-// reading. Two writers, one database — which is the case the busy timeout and
-// the single transaction policy exist for.
 await say(
   "Meanwhile, the loop",
-  "<em>army bots run --once</em> — a different process, the same file. The page is reading while " +
-    "the supervisor writes.",
+  "<em>army bots run --once</em> — a different process, the same SQLite file. The page is reading " +
+    "while the supervisor writes.",
   3600,
 );
-execFileSync(
-  "uv",
-  ["run", "--frozen", "python", "-m", "army", "bots", "run", "--once", "--offline",
-   "--config", process.env.ARMY_CONFIG],
-  { stdio: "ignore" },
-);
-await hide();
-await page.reload();
-await mount();
+tick();
+await page.waitForTimeout(6000);
 await say(
   "And the fleet moved",
-  "harvester's iteration settled and its next wake was written in the same transaction. A crash " +
-    "between those two writes would repeat the iteration or lose the bot; there is no gap to crash in.",
+  "The iteration settled and the next wake was written in the same transaction. A crash between " +
+    "those two writes would repeat the iteration or lose the bot; there is no gap to crash in.",
   5600,
 );
-await glide(420, 1200);
 await hide();
 
-// ── 3. one bot ──────────────────────────────────────────────────
-await visit("/bots/scout");
+// ── 4. one bot ──────────────────────────────────────────────────
+await select(/^scout/);
+await mount();
 await say(
   "One bot",
-  "scout: what it is for, how it is scheduled, what it has done, and what it has said.",
-  4000,
+  "scout: what it is for, what it has done, and what it has said. Its channel is one substrate for " +
+    "human-to-bot and bot-to-bot alike.",
+  5000,
 );
-await glide(420, 1300);
+await say(
+  "A disposable body is not an amnesiac one",
+  "Reports, lessons and verdicts all land here, and a fresh body is briefed from them.",
+  4600,
+);
+await hide();
+await page.getByRole("button", { name: "Runs" }).click();
+await page.waitForTimeout(1000);
+await mount();
+await say(
+  "Its iterations",
+  "Every run carries a classified outcome — work done, no work, rate limited, blocked, retryable. " +
+    "That outcome is what computes the next wake.",
+  5200,
+);
+await hide();
+await page.getByRole("button", { name: "Setup" }).click();
+await page.waitForTimeout(1000);
+await mount();
 await say(
   "Cadence is data",
   "A continuous bot must declare a model-free precondition. Without one, finding out there is " +
     "nothing to do costs a full vendor turn every interval.",
   5200,
 );
-await glide(900, 1300);
-await say(
-  "Its iterations",
-  "Every run carries a classified outcome — work done, no work, rate limited, blocked, retryable. " +
-    "That outcome is what computes the next wake.",
-  5000,
-);
-await glide(1500, 1400);
-await say(
-  "Its channel",
-  "One substrate for human-to-bot and bot-to-bot. Reports, lessons and verdicts all land here, and " +
-    "a fresh body is briefed from them — a disposable body is not an amnesiac one.",
-  5400,
-);
 await hide();
 
-// ── 4. bots that make bots ──────────────────────────────────────
-await visit("/proposals");
+// ── 5. bots that make bots ──────────────────────────────────────
+await select(/prospector-child/);
+await mount();
 await say(
   "Bots that make bots",
   "A bot may define a bot and request its activation. A human enables it — which makes runaway " +
@@ -215,43 +247,33 @@ await say(
 );
 await say(
   "The definition, not the pitch",
-  "The rationale is what the bot says it wants. The definition is what it would get, and it is " +
-    "shown in full — approving the first without reading the second is the whole attack.",
+  "The rationale is what the bot says it wants. The definition is what it would get, and it is shown " +
+    "in full — approving the first without reading the second is the whole attack.",
   5600,
 );
 await say(
+  "Two decisions, not one",
+  "Activate switches it on. Keep as draft creates it dormant. Saying a bot should exist is a " +
+    "separate act from starting it, so approving several in a row has not started several.",
+  5400,
+);
+await say(
   "And it cannot pay for itself",
-  "The child's 40 iterations are carved from scout's remaining, atomically. A bot cannot create " +
+  "The child's forty iterations are carved from scout's remaining, atomically. A bot cannot create " +
     "capacity by creating bots; it can only divide what it already had.",
   5200,
 );
 await hide();
-
-// ── 5. the boundary ─────────────────────────────────────────────
-await page.goto(`${BASE}/bots`);
+await page.getByRole("button", { name: "Activate" }).click();
+await page.waitForTimeout(2400);
 await mount();
 await say(
-  "The page is not open",
-  "Bots run on this box with network access, so reaching the port cannot be authority — a bot could " +
-    "otherwise curl this page and approve its own gate.",
-  5400,
-);
-await say(
-  "The token is the lock",
-  "It lives in a directory the per-bot sandbox already withholds. The one file that authorises a " +
-    "decision is the one file a bot cannot read.",
-  5000,
+  "The fleet grew, by a human's hand",
+  "prospector-child is active with its own budget, its own workspace and its own browser partition.",
+  4800,
 );
 await hide();
-
-await visit("/bots");
-await say(
-  "army bots serve",
-  "Served by the control plane itself — no framework, no build step, and no patch to a file " +
-    "upstream changes weekly.",
-  4600,
-);
-await page.waitForTimeout(900);
+await page.waitForTimeout(1200);
 
 await context.close();
 await browser.close();

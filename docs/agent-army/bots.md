@@ -11,12 +11,14 @@ spawned for one run and released at the end of it, so a reboot costs nothing, a
 bot waiting on a person holds no seat, and the whole fleet's state is one SQLite
 file you can back up.
 
-![Answering a bound approval, and the loop applying it from another process](media/bots-walkthrough.gif)
+![Signing an owner-only spend in the Bots section: the digest, the affirmation, and the grant spent once](media/bots-walkthrough.gif)
 
-*A real fleet, a real question, and a real `army bots run --once` in a second
-process while the page is open — the roster moves because the file did.
-Full walkthrough: [`media/bots-walkthrough.mp4`](media/bots-walkthrough.mp4)
-(1m 46s). How it was made, and the bug recording it found:
+*The Bots section of the app. A real fleet, a real $40 grant minted against the
+digest on the card and spent through `used_grants`, a real question answered,
+and a real `army bots run --once` in a second process while the page is open —
+the roster moves because the file did. Full walkthrough:
+[`media/bots-walkthrough.mp4`](media/bots-walkthrough.mp4) (2m 19s). How it was
+made, and the two bugs recording it found:
 [`media/bots-walkthrough/`](media/bots-walkthrough/).*
 
 ---

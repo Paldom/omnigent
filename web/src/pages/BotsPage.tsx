@@ -627,12 +627,19 @@ export function BotsPage() {
     else if (rows.length > 0) setSelection({ kind: "bot", slug: rows[0].slug });
   }, [selection, owner, needsYou, drafts, rows]);
 
-  // A decided row disappears from the roster, and a selection pointing at
-  // nothing renders an empty column. Fall back to whatever is next.
+  // A decided row leaves the roster, and a selection pointing at a row that is
+  // gone renders an empty column — which is exactly what answering something
+  // produces, so it is the common case rather than the edge one. Clearing puts
+  // the effect above back in charge of choosing what is next.
+  //
+  // Guarded on the fleet having loaded, not on the list being non-empty: an
+  // emptied list is precisely when this has to fire.
+  const loaded = Boolean(fleet.data);
+  const stale =
+    (selection?.kind === "owner" && !ownerRequest) || (selection?.kind === "draft" && !draft);
   useEffect(() => {
-    if (selection?.kind === "owner" && owner.length > 0 && !ownerRequest) setSelection(null);
-    if (selection?.kind === "draft" && !draft) setSelection(null);
-  }, [selection, owner, ownerRequest, draft]);
+    if (loaded && stale) setSelection(null);
+  }, [loaded, stale]);
 
   async function run(action: () => Promise<{ ok: boolean; reason?: string }>, fallback: string) {
     setRefusal(null);
