@@ -15,7 +15,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +79,64 @@ CREATE TABLE IF NOT EXISTS used_grants (
 );
 """
 
+#: Columns added to ``runs`` after the first release, as
+#: ``(name, declaration)``. ``CREATE TABLE IF NOT EXISTS`` cannot add a column
+#: to a table that already exists, and a live ``army.db`` predates all three —
+#: so they are detected and added rather than declared above.
+#:
+#: Every one is nullable. That is what lets an older binary keep writing to a
+#: newer database: its INSERT names its own columns and SQLite fills these with
+#: NULL, which reads back as "this run had no bot", which is true.
+_RUN_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("bot_id", "TEXT"),
+    ("revision_id", "TEXT"),
+    ("outcome", "TEXT"),
+)
+
+#: One live run per bot, enforced where it cannot be forgotten.
+#:
+#: ``paused`` is deliberately *inside* the index. It is resumable, so excluding
+#: it would let a tick open a second run while the first sits paused, and the
+#: resume would then collide on an IntegrityError the CAS path does not expect.
+#: Keeping it in also gives "pause this run" the meaning people assume: the bot
+#: stops, rather than quietly starting the next iteration.
+_ONE_LIVE_RUN_PER_BOT = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS one_live_run_per_bot ON runs (bot_id)"
+    " WHERE bot_id IS NOT NULL AND state NOT IN ('continue','completed','failed')"
+)
+
+
+def add_missing_columns(
+    conn: sqlite3.Connection, table: str, columns: tuple[tuple[str, str], ...]
+) -> list[str]:
+    """
+    Add columns a live database predates, and nothing else.
+
+    This is the whole migration mechanism, and keeping it this small is
+    deliberate. A version-number ladder would need every step written, ordered
+    and never re-run; asking the table what it already has is idempotent by
+    construction, so a fresh database and a two-year-old one end up identical
+    and running it twice costs one ``PRAGMA``.
+
+    What it cannot do is change or drop a column, which is the correct
+    limitation: those need the data rewritten, and a schema helper that quietly
+    rewrites data is how a Saturday disappears.
+
+    :param conn: An open connection, inside whatever transaction the caller has.
+    :param table: Table to extend.
+    :param columns: ``(name, declaration)`` pairs. Declarations must be
+        nullable so an older binary can still write the row.
+    :returns: The names actually added, for a log line.
+    """
+    present = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    added = []
+    for name, declaration in columns:
+        if name in present:
+            continue
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+        added.append(name)
+    return added
+
 
 class ConcurrentTransition(RuntimeError):
     """Raised when a transition loses the compare-and-swap.
@@ -103,6 +161,9 @@ class Store:
             # status, which is the only concurrency this thing has.
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_SCHEMA)
+            add_missing_columns(conn, "runs", _RUN_COLUMNS)
+            # After the columns exist, never before: the index names one.
+            conn.execute(_ONE_LIVE_RUN_PER_BOT)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -118,45 +179,112 @@ class Store:
         finally:
             conn.close()
 
+    @contextmanager
+    def atomic(self) -> Iterator[sqlite3.Connection]:
+        """
+        Run several writes as one transaction.
+
+        Every method below opens its own transaction when called on its own,
+        which is right for a single write and wrong for a succession: ending
+        one iteration and scheduling the next are two writes that a crash
+        between would either repeat or lose. Pass the connection this yields as
+        each call's *conn* and they land together or not at all.
+
+        **Nothing inside may do I/O.** Not an HTTP call to Omnigent, not a
+        subprocess, not a queue file. A transaction holds SQLite's write lock,
+        so a network call inside one turns ``army status`` into a hang; worse,
+        a crash mid-call cannot roll the call back, so the effect happened and
+        the row says it did not. Write the intent, commit, do the I/O, record
+        the result in a new transaction — which is what ``effects`` is for.
+
+        ``BEGIN IMMEDIATE`` rather than the default deferred begin: the write
+        lock is taken up front, so two writers queue instead of both reading,
+        both deciding, and the second failing to upgrade. It also puts the
+        compare-and-swap *read* inside the transaction, which a deferred begin
+        would leave outside it.
+
+        :returns: A connection that commits on a clean exit and rolls back on
+            an exception.
+        """
+        conn = sqlite3.connect(self.path, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+
+    def _tx(self, conn: sqlite3.Connection | None) -> AbstractContextManager[sqlite3.Connection]:
+        """
+        Join the caller's transaction, or open one for this write alone.
+
+        :param conn: A connection from :meth:`atomic`, or ``None``.
+        :returns: A context manager yielding the connection to use. When the
+            caller supplied one, exiting it commits nothing — the outer
+            :meth:`atomic` owns that decision.
+        """
+        return nullcontext(conn) if conn is not None else self._connect()
+
     # ── runs ──────────────────────────────────────────────────────
 
-    def create_run(self, run: Run) -> Run:
+    def create_run(self, run: Run, *, conn: sqlite3.Connection | None = None) -> Run:
         """
         Insert a new run.
 
         :param run: The run to persist, normally from :meth:`Run.new`.
+        :param conn: Join an open transaction from :meth:`atomic`, or ``None``
+            to write on its own.
         :returns: The same run.
+        :raises ConcurrentTransition: If this bot already has a live run. The
+            partial unique index is what enforces one iteration per bot, so two
+            ticks racing the same due bot produce one run and one loser — the
+            same shape as losing a compare-and-swap, and handled the same way.
         """
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO runs (id, workflow, state, version, attempt, created_at,"
-                " updated_at, payload, artifacts, outstanding, approval_id, terminal_reason)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    run.id,
-                    run.workflow,
-                    run.state.value,
-                    run.version,
-                    run.attempt,
-                    run.created_at,
-                    run.updated_at,
-                    dumps(run.payload),
-                    dumps(run.artifacts),
-                    dumps(run.outstanding),
-                    run.approval_id,
-                    run.terminal_reason,
-                ),
-            )
+        try:
+            with self._tx(conn) as conn:
+                conn.execute(
+                    "INSERT INTO runs (id, workflow, state, version, attempt, created_at,"
+                    " updated_at, payload, artifacts, outstanding, approval_id,"
+                    " terminal_reason, bot_id, revision_id, outcome)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        run.id,
+                        run.workflow,
+                        run.state.value,
+                        run.version,
+                        run.attempt,
+                        run.created_at,
+                        run.updated_at,
+                        dumps(run.payload),
+                        dumps(run.artifacts),
+                        dumps(run.outstanding),
+                        run.approval_id,
+                        run.terminal_reason,
+                        run.bot_id,
+                        run.revision_id,
+                        run.outcome,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ConcurrentTransition(
+                f"bot {run.bot_id} already has a live run; another tick won"
+            ) from exc
         return run
 
-    def get_run(self, run_id: str) -> Run | None:
+    def get_run(self, run_id: str, *, conn: sqlite3.Connection | None = None) -> Run | None:
         """
         Load one run by id.
 
         :param run_id: Run to load.
+        :param conn: Join an open transaction from :meth:`atomic`, or ``None``.
         :returns: The run, or ``None`` if there is no such row.
         """
-        with self._connect() as conn:
+        with self._tx(conn) as conn:
             row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
         return _row_to_run(row) if row is not None else None
 
@@ -229,7 +357,9 @@ class Store:
         terminal_reason: str | None = None,
         attempt: int | None = None,
         consume: Command | None = None,
+        outcome: str | None = None,
         now: int | None = None,
+        conn: sqlite3.Connection | None = None,
     ) -> Run:
         """
         Advance a run by exactly one legal move, or fail.
@@ -248,7 +378,15 @@ class Store:
         :param terminal_reason: Why it ended, for a terminal move.
         :param attempt: Replacement attempt count, or ``None`` to keep.
         :param consume: A command to mark consumed atomically with the move.
+        :param outcome: How the iteration classified itself, set on the move
+            that ends it. Recorded with the transition rather than after it,
+            because a terminal run with no outcome is indistinguishable from
+            one that did work — and the scheduler would wake the bot at its
+            floor forever on that reading.
         :param now: Unix epoch seconds; defaults to the clock.
+        :param conn: Join an open transaction from :meth:`atomic`, so the move
+            lands with whatever else that transaction is writing — a bot's
+            successor wake, say.
         :returns: The run as it now stands.
         :raises IllegalTransition: If the move is not defined.
         :raises ConcurrentTransition: If someone else moved first.
@@ -268,46 +406,64 @@ class Store:
             outstanding=run.outstanding if outstanding is None else outstanding,
             approval_id=run.approval_id if approval_id is None else approval_id,
             terminal_reason=terminal_reason,
+            bot_id=run.bot_id,
+            revision_id=run.revision_id,
+            outcome=run.outcome if outcome is None else outcome,
         )
-        with self._connect() as conn:
-            cursor = conn.execute(
-                "UPDATE runs SET state = ?, version = ?, attempt = ?, updated_at = ?,"
-                " artifacts = ?, outstanding = ?, approval_id = ?, terminal_reason = ?"
-                " WHERE id = ? AND version = ?",
-                (
-                    updated.state.value,
-                    updated.version,
-                    updated.attempt,
-                    updated.updated_at,
-                    dumps(updated.artifacts),
-                    dumps(updated.outstanding),
-                    updated.approval_id,
-                    updated.terminal_reason,
-                    run.id,
-                    run.version,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise ConcurrentTransition(
-                    f"run {run.id} moved on from version {run.version}; re-read before deciding"
+        try:
+            with self._tx(conn) as conn:
+                cursor = conn.execute(
+                    "UPDATE runs SET state = ?, version = ?, attempt = ?, updated_at = ?,"
+                    " artifacts = ?, outstanding = ?, approval_id = ?, terminal_reason = ?,"
+                    " outcome = ? WHERE id = ? AND version = ?",
+                    (
+                        updated.state.value,
+                        updated.version,
+                        updated.attempt,
+                        updated.updated_at,
+                        dumps(updated.artifacts),
+                        dumps(updated.outstanding),
+                        updated.approval_id,
+                        updated.terminal_reason,
+                        updated.outcome,
+                        run.id,
+                        run.version,
+                    ),
                 )
-            if consume is not None:
-                conn.execute(
-                    "UPDATE commands SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL",
-                    (stamp, consume.id),
-                )
+                if cursor.rowcount != 1:
+                    raise ConcurrentTransition(
+                        f"run {run.id} moved on from version {run.version};"
+                        " re-read before deciding"
+                    )
+                if consume is not None:
+                    conn.execute(
+                        "UPDATE commands SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL",
+                        (stamp, consume.id),
+                    )
+        except sqlite3.IntegrityError as exc:
+            # Resuming a paused run puts it back inside the one-live-run index.
+            # If a tick opened a second run while it sat paused, that resume is
+            # the collision — and it is the same answer as losing a CAS: re-read,
+            # because the world moved.
+            raise ConcurrentTransition(
+                f"run {run.id} cannot move to {target.value};"
+                f" bot {run.bot_id} has another live run"
+            ) from exc
         return updated
 
     # ── commands ──────────────────────────────────────────────────
 
-    def record_command(self, command: Command) -> Command:
+    def record_command(
+        self, command: Command, *, conn: sqlite3.Connection | None = None
+    ) -> Command:
         """
         Persist a command so it outlives whatever asked for it.
 
         :param command: The command, normally from :meth:`Command.new`.
+        :param conn: Join an open transaction from :meth:`atomic`, or ``None``.
         :returns: The same command.
         """
-        with self._connect() as conn:
+        with self._tx(conn) as conn:
             conn.execute(
                 "INSERT INTO commands (id, run_id, kind, payload, created_at, consumed_at)"
                 " VALUES (?,?,?,?,?,?)",
@@ -322,14 +478,17 @@ class Store:
             )
         return command
 
-    def next_command(self, run_id: str) -> Command | None:
+    def next_command(
+        self, run_id: str, *, conn: sqlite3.Connection | None = None
+    ) -> Command | None:
         """
         Return the oldest unconsumed command for a run.
 
         :param run_id: Run to check.
+        :param conn: Join an open transaction from :meth:`atomic`, or ``None``.
         :returns: The command, or ``None`` when nothing is outstanding.
         """
-        with self._connect() as conn:
+        with self._tx(conn) as conn:
             row = conn.execute(
                 "SELECT * FROM commands WHERE run_id = ? AND consumed_at IS NULL"
                 " ORDER BY created_at, id LIMIT 1",
@@ -519,4 +678,25 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         outstanding=loads(row["outstanding"], []),
         approval_id=row["approval_id"],
         terminal_reason=row["terminal_reason"],
+        bot_id=_optional(row, "bot_id"),
+        revision_id=_optional(row, "revision_id"),
+        outcome=_optional(row, "outcome"),
     )
+
+
+def _optional(row: sqlite3.Row, column: str) -> Any:
+    """
+    Read a column that a database written by an older binary may not have.
+
+    ``SELECT *`` against a pre-migration file returns a row with no such key,
+    and one missing column must not make a run unloadable — the run is what
+    holds the loop's place.
+
+    :param row: The row as read.
+    :param column: Column name.
+    :returns: The value, or ``None`` when the column is absent.
+    """
+    try:
+        return row[column]
+    except (IndexError, KeyError):
+        return None

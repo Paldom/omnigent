@@ -121,7 +121,7 @@ class Supervisor:
         """
         stamp = int(time.time()) if now is None else now
         report = TickReport()
-        active = self.store.active_runs(workflow=self.workload.name)
+        active = self._active_runs()
 
         for run in active:
             try:
@@ -133,7 +133,17 @@ class Supervisor:
                 continue
             except Exception:
                 _logger.exception("run %s could not be advanced", run.id)
-                self._fail(run, "supervisor error", now=stamp)
+                try:
+                    self._fail(run, "supervisor error", now=stamp)
+                except Exception:
+                    # Recording the failure failed too — a store that is down,
+                    # or a subclass whose own write is what broke. Leaving the
+                    # run exactly where it is costs one tick and loses nothing;
+                    # letting this escape would end the pass and strand every
+                    # run after it in the list.
+                    _logger.exception(
+                        "run %s could not even be marked failed; leaving it untouched", run.id
+                    )
                 report.failed += 1
                 continue
             if moved is None:
@@ -159,6 +169,48 @@ class Supervisor:
         if item is None:
             return None
         return self.store.create_run(Run.new(self.workload.name, item, now=now))
+
+    # ── seams a bot fleet overrides ───────────────────────────────
+    #
+    # A supervisor driving one workload knows the answer to both of these
+    # before it starts. A supervisor driving bots does not: each bot names its
+    # own workload, and which runs are its business is a different query. They
+    # are methods rather than constructor arguments so the subclass can answer
+    # per run, which is the part that actually varies.
+
+    def _active_runs(self) -> list[Run]:
+        """
+        The runs this supervisor is responsible for advancing.
+
+        :returns: Non-terminal runs of this supervisor's workload.
+        """
+        return self.store.active_runs(workflow=self.workload.name)
+
+    def _workload_for(self, run: Run) -> Workload:  # noqa: ARG002
+        """
+        The workload that owns one run.
+
+        :param run: The run being advanced.
+        :returns: Its workload.
+        """
+        return self.workload
+
+    def _transition(self, run: Run, target: RunState, **kwargs: Any) -> Run:
+        """
+        Write one state change.
+
+        Every move in this class goes through here, which is what lets a bot
+        fleet make the *succession* atomic: ending an iteration and scheduling
+        the bot's next wake are two writes, and a crash between them either
+        repeats the iteration or loses it. A subclass overrides this once and
+        both land in the same transaction.
+
+        :param run: The run as read.
+        :param target: Where to move it.
+        :param kwargs: Passed to :meth:`army.store.Store.transition`.
+        :returns: The run after its move.
+        """
+        return self.store.transition(run, target, **kwargs)
 
     # ── one move ──────────────────────────────────────────────────
 
@@ -220,7 +272,7 @@ class Supervisor:
             self._discard_stale(run, command, now=now)
             return None
         _logger.info("run %s resumed by owner", run.id)
-        return self.store.transition(
+        return self._transition(
             run, RunState.READY, attempt=0, terminal_reason=None, consume=command, now=now
         )
 
@@ -238,19 +290,21 @@ class Supervisor:
         """Move ``READY`` to ``DISPATCHING``, respecting attempt limits and lanes."""
         if run.attempt >= MAX_ATTEMPTS:
             return self._fail(run, f"gave up after {run.attempt} attempts", now=now)
-        if self.lanes is not None and not self.lanes.would_admit(_workload_lane(self.workload)):
+        if self.lanes is not None and not self.lanes.would_admit(
+            _workload_lane(self._workload_for(run))
+        ):
             # The lane this run will land on is full or cooling. Leaving it in
             # READY is the backpressure: it goes when that lane frees. Asking
             # "is any lane free" instead would admit a third Claude session
             # because Grok happens to be idle.
             return None
-        moved = self.store.transition(run, RunState.DISPATCHING, attempt=run.attempt + 1, now=now)
+        moved = self._transition(run, RunState.DISPATCHING, attempt=run.attempt + 1, now=now)
         return self._dispatch_children(moved, now=now)
 
     def _dispatch_children(self, run: Run, *, now: int) -> Run | None:
         """Start the workload's sessions and move on to collecting them."""
         try:
-            sessions = self.workload.dispatch(run, self.omni)
+            sessions = self._workload_for(run).dispatch(run, self.omni)
         except OmniError as exc:
             if exc.is_transient:
                 # Leave it in DISPATCHING; the next tick tries again and the
@@ -259,7 +313,7 @@ class Supervisor:
                 return None
             return self._fail(run, f"dispatch failed: {exc}", now=now)
         charged = self._charge_lanes(sessions)
-        return self.store.transition(
+        return self._transition(
             run,
             RunState.COLLECTING,
             outstanding=sessions,
@@ -328,7 +382,7 @@ class Supervisor:
         if limited is not None:
             return self._requeue_rate_limited(run, limited, now=now)
         try:
-            done, artifacts = self.workload.collect(run, self.omni)
+            done, artifacts = self._workload_for(run).collect(run, self.omni)
         except OmniError as exc:
             if exc.is_transient:
                 _logger.warning("collect for run %s hit a transient error: %s", run.id, exc)
@@ -340,10 +394,10 @@ class Supervisor:
                 return None
             # Partial progress is worth persisting: a crash mid-iteration then
             # costs the remaining children, not the ones already finished.
-            return self.store.transition(run, RunState.COLLECTING, artifacts=merged, now=now)
+            return self._transition(run, RunState.COLLECTING, artifacts=merged, now=now)
         if self.lanes is not None:
             self._release_lanes(run)
-        return self.store.transition(
+        return self._transition(
             run, RunState.EVALUATING, artifacts=merged, outstanding=[], now=now
         )
 
@@ -406,11 +460,11 @@ class Supervisor:
             phrase,
             session_id,
         )
-        return self.store.transition(run, RunState.READY, outstanding=[], now=now)
+        return self._transition(run, RunState.READY, outstanding=[], now=now)
 
     def _ask(self, run: Run, *, now: int) -> Run | None:
         """Put the question to the human and park on the answer."""
-        question, options, evidence = self.workload.evaluate(run)
+        question, options, evidence = self._workload_for(run).evaluate(run)
         session_id = _asking_session(run)
         if session_id is None:
             return self._fail(run, "no session to raise the approval on", now=now)
@@ -421,7 +475,7 @@ class Supervisor:
                 _logger.warning("could not raise approval for run %s: %s", run.id, exc)
                 return None
             return self._fail(run, f"could not ask: {exc}", now=now)
-        return self.store.transition(
+        return self._transition(
             run,
             RunState.WAITING_HUMAN,
             artifacts={**run.artifacts, "question": question, "options": options},
@@ -442,22 +496,22 @@ class Supervisor:
         if command is None:
             return None
         if command.kind is CommandKind.CANCEL:
-            return self.store.transition(
+            return self._transition(
                 run, RunState.FAILED, terminal_reason="cancelled", consume=command, now=now
             )
         if command.kind is CommandKind.PAUSE:
-            return self.store.transition(
+            return self._transition(
                 run,
                 RunState.PAUSED,
                 terminal_reason="paused by owner",
                 consume=command,
                 now=now,
             )
-        decision, reason = self.workload.apply(run, command.kind.value, command.payload)
+        decision, reason = self._workload_for(run).apply(run, command.kind.value, command.payload)
         target = _DECISION_STATES.get(decision)
         if target is None:
             return self._fail(run, f"workload returned an unknown decision {decision!r}", now=now)
-        return self.store.transition(run, target, terminal_reason=reason, consume=command, now=now)
+        return self._transition(run, target, terminal_reason=reason, consume=command, now=now)
 
     def _command_from_chat_reply(self, run: Run, *, now: int) -> Command | None:
         """
@@ -526,7 +580,7 @@ class Supervisor:
         if self.lanes is not None and run.outstanding:
             self._release_lanes(run)
         try:
-            return self.store.transition(
+            return self._transition(
                 run, RunState.FAILED, terminal_reason=reason, outstanding=[], now=now
             )
         except ConcurrentTransition:

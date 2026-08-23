@@ -131,6 +131,14 @@ class Run:
     :param approval_id: The Omnigent elicitation id this run is parked on, when
         it is in ``WAITING_HUMAN``.
     :param terminal_reason: Why the run ended, for a terminal state.
+    :param bot_id: The bot this iteration belongs to, or ``None`` for a run the
+        supervisor opened from a workload queue with no bot behind it.
+    :param revision_id: Which snapshot of that bot's definition was in force,
+        so history keeps its meaning after the persona is edited.
+    :param outcome: How the iteration classified itself, from
+        ``army.bots.model.RunOutcome``. This is what the scheduler reads to
+        decide the next wake; a terminal run without one looks like work was
+        done, which is the quota loop.
     """
 
     id: str
@@ -145,9 +153,19 @@ class Run:
     outstanding: list[str] = field(default_factory=list)
     approval_id: str | None = None
     terminal_reason: str | None = None
+    bot_id: str | None = None
+    revision_id: str | None = None
+    outcome: str | None = None
 
     @staticmethod
-    def new(workflow: str, payload: dict[str, Any], *, now: int) -> Run:
+    def new(
+        workflow: str,
+        payload: dict[str, Any],
+        *,
+        now: int,
+        bot_id: str | None = None,
+        revision_id: str | None = None,
+    ) -> Run:
         """
         Open a fresh run in :attr:`RunState.READY`.
 
@@ -155,6 +173,8 @@ class Run:
         :param payload: The work item.
         :param now: Unix epoch seconds, supplied by the caller so tests and
             replays can pin it.
+        :param bot_id: The bot this iteration is for, when there is one.
+        :param revision_id: The bot definition it runs under.
         :returns: The new run, not yet persisted.
         """
         return Run(
@@ -166,6 +186,8 @@ class Run:
             created_at=now,
             updated_at=now,
             payload=payload,
+            bot_id=bot_id,
+            revision_id=revision_id,
         )
 
     @property
