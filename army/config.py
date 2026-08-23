@@ -45,6 +45,11 @@ class Config:
     :param limit_phrases: Text that means a vendor refused on quota. Vendor
         wording differs and changes, and a phrase that never matches fails
         silently, so this is configurable rather than compiled in.
+    :param allow_workloads: Dotted ``module:Class`` paths a bot definition may
+        name. ``None`` permits only the ones that ship with the loop, which is
+        the right default on a box where a bot can propose another bot: a
+        definition is data, and data that can name arbitrary importable code is
+        not data any more.
     """
 
     server_url: str = "http://localhost:6767"
@@ -55,6 +60,7 @@ class Config:
     lanes: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_LANES))
     max_concurrent_runs: int = 3
     limit_phrases: tuple[str, ...] = DEFAULT_LIMIT_PHRASES
+    allow_workloads: set[str] | None = None
 
     def load_workload(self) -> Workload:
         """
@@ -111,6 +117,13 @@ def load_config(path: Path | None = None) -> Config:
         # vendors refuse knows better than this file's defaults, and a list you
         # cannot narrow is one you cannot debug.
         config.limit_phrases = tuple(str(p).lower() for p in rate_limit["phrases"])
+
+    bots = data.get("bots")
+    if isinstance(bots, dict) and isinstance(bots.get("allow_workloads"), list):
+        # An explicit list replaces the built-in prefixes rather than extending
+        # them: an operator naming what may run wants that list to be the whole
+        # answer, not a suggestion on top of defaults they did not write.
+        config.allow_workloads = {str(path) for path in bots["allow_workloads"]}
 
     # Read last so an environment token always beats a file that should not
     # have contained one in the first place.

@@ -29,10 +29,10 @@ from army.bots.registry import WorkloadRefused, WorkloadRegistry
 from army.bots.schedule import Wake, next_wake
 from army.bots.store import BotStore
 from army.lanes import Lanes
-from army.omni import OmniClient
+from army.omni import OmniClient, OmniError
 from army.state import Run, RunState
 from army.store import ConcurrentTransition, Store
-from army.supervisor import Supervisor, TickReport
+from army.supervisor import Supervisor, TickReport, _asking_session
 from army.workload import Workload
 
 _logger = logging.getLogger(__name__)
@@ -357,6 +357,66 @@ class BotSupervisor(Supervisor):
         except ConcurrentTransition:
             _logger.debug("bot %s moved while pausing it", bot.slug)
 
+    # ── asking ────────────────────────────────────────────────────
+
+    def _ask(self, run: Run, *, now: int) -> Run | None:
+        """
+        Put the iteration's question where it will outlive the process asking.
+
+        The base class posts into an Omnigent session and parks on the id it
+        gets back, which is right when a session is where the work happened —
+        but it means an iteration that spawned no session cannot ask at all,
+        and the base class fails the run rather than parking it. For a bot that
+        is the wrong answer twice over: the question is the point of the
+        iteration, and the row is the record, not the transcript.
+
+        So the question is written into the run either way, and the session is
+        only where it is *also* shown. A bot whose workload needs no sessions
+        still asks, and is still answerable with ``army approve``.
+
+        :param run: The run, in ``EVALUATING``.
+        :param now: Epoch seconds.
+        :returns: The run, parked on a person.
+        """
+        question, options, evidence = self._workload_for(run).evaluate(run)
+        artifacts = {
+            **run.artifacts,
+            "question": question,
+            "options": options,
+            "evidence": evidence,
+        }
+        approval_id = f"barrier_{run.id}"
+
+        session_id = _asking_session(run)
+        if session_id is not None:
+            try:
+                approval_id = self.omni.ask(
+                    run.id, session_id, question, options, evidence=evidence
+                )
+            except OmniError as exc:
+                if exc.is_transient:
+                    # The row would be right and the notification would not.
+                    # Retry next tick rather than parking on a question nobody
+                    # was shown.
+                    _logger.warning("could not post the question for run %s: %s", run.id, exc)
+                    return None
+                _logger.warning(
+                    "run %s: could not post the question to session %s (%s); "
+                    "parking on the durable row instead — answer with `army approve %s`",
+                    run.id[:12],
+                    session_id,
+                    exc,
+                    run.id[:12],
+                )
+
+        return self._transition(
+            run,
+            RunState.WAITING_HUMAN,
+            artifacts=artifacts,
+            approval_id=approval_id,
+            now=now,
+        )
+
     # ── succession ────────────────────────────────────────────────
 
     def _transition(self, run: Run, target: RunState, **kwargs: Any) -> Run:
@@ -450,33 +510,42 @@ class BotSupervisor(Supervisor):
         return report
 
 
+#: Moves whose outcome only the workload can know. Everything else is decided
+#: by the move itself, because the move already says what happened and a
+#: declaration made earlier in the iteration cannot contradict it.
+_WORKLOAD_DECIDES = frozenset({RunState.CONTINUE, RunState.COMPLETED})
+
+
 def classify(run: Run, target: RunState) -> RunOutcome:
     """
     Say what an iteration achieved, in the terms the scheduler understands.
 
-    The workload gets the first word: it is the only thing that knows whether
-    ``CONTINUE`` meant "merged a change" or "looked and found nothing", and
-    those two want opposite wake times. It says so by putting an ``outcome`` in
-    the run's artifacts. Everything else is read from the move itself.
+    Most moves classify themselves: parking on a person is ``BLOCKED``, a
+    requeue is ``RATE_LIMITED``, a failure is an error. Exactly one case is
+    genuinely ambiguous — an iteration that finished cleanly may have merged a
+    change or may have looked and found nothing, and those two want opposite
+    wake times. Only the workload knows which, and it says so by putting an
+    ``outcome`` in the run's artifacts.
+
+    The declaration is deliberately *not* consulted for the other moves. It is
+    written in ``collect``, before the iteration is settled, so a run that then
+    parks or fails still carries whatever ``collect`` believed. Letting that
+    win would make blocking on a human count as an idle iteration — backing the
+    bot off for having asked a question — and would reset the error streak on
+    every failure.
 
     :param run: The run being settled.
     :param target: The state it is moving to.
     :returns: The outcome.
     """
-    declared = run.artifacts.get("outcome")
-    if isinstance(declared, str):
-        try:
-            return RunOutcome(declared)
-        except ValueError:
-            _logger.warning(
-                "run %s declared an unknown outcome %r; classifying it from the move instead",
-                run.id[:12],
-                declared,
-            )
-
     if target is RunState.WAITING_HUMAN:
         # Parked on a person. No next wake at all — the verdict's own
         # transaction is what schedules the bot again.
+        return RunOutcome.BLOCKED
+    if target is RunState.PAUSED:
+        # A human stopped this branch. Nothing was learned about the mission,
+        # so neither streak should move, and BLOCKED is the outcome that leaves
+        # both alone.
         return RunOutcome.BLOCKED
     if target is RunState.READY:
         # The only way back to READY from a working state is the requeue after
@@ -484,11 +553,17 @@ def classify(run: Run, target: RunState) -> RunOutcome:
         return RunOutcome.RATE_LIMITED
     if target is RunState.FAILED:
         return RunOutcome.RETRYABLE_ERROR
-    if target is RunState.PAUSED:
-        # A human stopped this branch. Nothing about the mission was learned,
-        # so neither streak should move — and BLOCKED is the outcome that
-        # leaves both alone.
-        return RunOutcome.BLOCKED
+
+    declared = run.artifacts.get("outcome")
+    if target in _WORKLOAD_DECIDES and isinstance(declared, str):
+        try:
+            return RunOutcome(declared)
+        except ValueError:
+            _logger.warning(
+                "run %s declared an unknown outcome %r; treating the iteration as work done",
+                run.id[:12],
+                declared,
+            )
     return RunOutcome.WORK_DONE
 
 

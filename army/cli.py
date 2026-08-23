@@ -264,6 +264,16 @@ def build_parser() -> argparse.ArgumentParser:
         "effects", help="list side effects with an unknown outcome", parents=[common]
     )
     effects.set_defaults(func=cmd_effects)
+
+    # The one place `army` knows Bot mode exists, and it is a lazy import
+    # inside a function: `import army.cli` must not pull in the fleet, and
+    # deleting `army/bots/` must leave everything above still working.
+    try:
+        from army.bots.cli import add_parser as add_bots_parser
+    except ImportError:  # pragma: no cover — only when army/bots/ is removed
+        pass
+    else:
+        add_bots_parser(sub, common)
     return parser
 
 

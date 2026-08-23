@@ -36,8 +36,9 @@ class WorkloadRegistry:
         be created at runtime by other bots.
     """
 
-    #: Paths always permitted, because they ship with the loop.
-    DEFAULT_PREFIX = "army.workloads."
+    #: Prefixes always permitted, because they ship with the loop and a person
+    #: reviewed them. Anything else is a decision the operator has to make.
+    DEFAULT_PREFIXES: tuple[str, ...] = ("army.workloads.", "army.bots.workloads.")
 
     def __init__(self, allow: set[str] | None = None) -> None:
         self.allow = allow
@@ -51,7 +52,7 @@ class WorkloadRegistry:
         :returns: Whether it is allowed.
         """
         if self.allow is None:
-            return path.startswith(self.DEFAULT_PREFIX)
+            return path.startswith(self.DEFAULT_PREFIXES)
         return path in self.allow
 
     def resolve(self, path: str, options: dict[str, Any] | None = None) -> Workload:

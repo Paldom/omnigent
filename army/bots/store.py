@@ -334,6 +334,40 @@ class BotStore:
             ).fetchall()
         return {row["bot_id"]: row["state"] for row in rows}
 
+    def live_run_ids(self) -> dict[str, str]:
+        """
+        The id of each bot's in-flight run, so the roster can link to it.
+
+        :returns: ``{bot_id: run_id}`` for every bot with a non-terminal run.
+        """
+        with self.store.atomic() as conn:
+            rows = conn.execute(
+                "SELECT bot_id, id FROM runs WHERE bot_id IS NOT NULL"
+                " AND state NOT IN ('continue','completed','failed')"
+            ).fetchall()
+        return {row["bot_id"]: row["id"] for row in rows}
+
+    def runs_for(self, bot_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """
+        A bot's recent iterations, newest first, for its ledger.
+
+        Returns plain dicts rather than :class:`~army.state.Run` objects: the
+        caller wants a display row, and rebuilding the full object would decode
+        three JSON columns nobody is going to read.
+
+        :param bot_id: The bot.
+        :param limit: How many.
+        :returns: One dict per run.
+        """
+        with self.store.atomic() as conn:
+            rows = conn.execute(
+                "SELECT id, state, outcome, revision_id, created_at, updated_at,"
+                " terminal_reason FROM runs WHERE bot_id = ?"
+                " ORDER BY created_at DESC, id DESC LIMIT ?",
+                (bot_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def stalled(self, *, now: int) -> list[Bot]:  # noqa: ARG002
         """
         Active bots that nothing will ever wake, and that nothing is waiting for.
