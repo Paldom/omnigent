@@ -72,37 +72,37 @@ await mount();
 
 // ── 1. a real fleet on a real repository ────────────────────────
 await say(
-  "Bot mode · a real project",
-  "One bot, against <em>~/git/crypto</em> — an autonomous Freqtrade research system that is " +
-    "genuinely running and genuinely stuck: no strategy it has found is profitable net of fees.",
-  6000,
-);
-await say(
-  "Its body is an ordinary session",
-  "The sidebar's Sessions list is the real Codex sessions this bot opened. A bot owns no process " +
-    "between iterations; a run borrows one and gives it back.",
-  5600,
-);
-
-// ── 2. the finding ──────────────────────────────────────────────
-await say(
-  "What it found, unattended",
-  "The project's README says Kraken costs 0.40% a side — 0.80% round trip. The bot checked the " +
-    "published schedule, traced the value through the code, and counted the rows.",
+  "Nine bots, from your own roster",
+  "<em>registry/agents.yaml</em> has 22 agents. Nine of them are LLM sessions on a schedule, so nine " +
+    "became bots — generated from the roster, never hand-written.",
   6200,
 );
 await say(
-  "The README is stale",
-  "0.40% is the <em>maker</em> rate. The 75 leaderboard rows charged 0.80% at entry <em>and</em> " +
-    "exit — <em>1.60% round trip, twice what the headline says</em>. Every net-edge conclusion in " +
-    "that repository rests on this number.",
+  "Thirteen deliberately did not",
+  "The orchestrator writes the registry and the owner channel, so a bot version of it would supervise " +
+    "its own supervisor. streams-collector is a daemon. fleet-commander and risk-officer sit on the " +
+    "money path. Each exclusion carries its argument in the generator.",
   7000,
 );
 await say(
-  "It also corrected the question",
-  "The queue said 'roughly 150 rows'. The bot said 75 displayed and 41 quarantined, and cited the " +
-    "line. A question resting on a false premise gets the premise back.",
-  6000,
+  "Bound to your rows, not copies",
+  "Each bot names its roster row and reads <em>its</em> charter by path — " +
+    "agents/qualitative/macro-regime-observer/charter.md. Two charters that can disagree is worse " +
+    "than one.",
+  6400,
+);
+await say(
+  "Three active, six draft",
+  "Only the ones you would actually run tonight are active. The planned rows became drafts, because " +
+    "activation is a human act and the roster says they are not live yet.",
+  5800,
+);
+await say(
+  "Real work, unattended",
+  "Three ran concurrently, each in its own git worktree, each committing to its own branch. " +
+    "research-runner found the README's fee assumption is stale by 2x. news-sentiment-analyst " +
+    "found that none of the four daily scans have produced an artifact in 30 days.",
+  7400,
 );
 
 // ── 3. what the verdict is bound to ─────────────────────────────

@@ -1,10 +1,32 @@
 # Bot mode against a real project
 
-`crypto-bot.mp4` is one bot working on `~/git/crypto` — "trading-army", an
-autonomous Freqtrade research system that is genuinely running and genuinely
-stuck: nothing it has found is profitable net of Kraken's fees. Nothing in the
-recording is staged. The body is a real Codex session, the branch and commit on
-the approval card are real, and the finding is the session's own.
+`crypto-bot.mp4` is nine bots on `~/git/crypto` — "trading-army", an autonomous
+Freqtrade research system that is genuinely running and genuinely stuck:
+nothing it has found is profitable net of Kraken's fees. Nothing in the
+recording is staged. The bodies are real Codex sessions, the branches and
+commits on the approval cards are real, and the findings are the sessions'
+own.
+
+## Nine of twenty-two
+
+`registry/agents.yaml` is the roster of record and stays that way. Nine rows
+are LLM sessions on a schedule, so `tools/bots/sync.py` projects those nine
+into bot definitions — each naming its row via `source_agent` and reading
+*its* charter by path, never a copy.
+
+Thirteen are excluded with the argument for each in `EXCLUDED`: the
+orchestrator writes the registry and the owner channel and would be supervising
+its own supervisor; `streams-collector` and `signal-bus-curator` are daemons;
+`backtest-operator` and `hyperopt-runner` are `cycle.py` with no LLM in the
+loop; `fleet-commander` and `risk-officer` sit on the money path.
+
+Three of the nine are active — the ones the roster itself calls active, plus
+`research-runner`. The other six are drafts, because activation is a human act
+and the roster says they are not live.
+
+Each active bot gets **its own worktree**: two bots sharing a checkout both run
+`git add -A`, so one picks up the other's half-finished work and the branch
+stops meaning what that bot did.
 
 ## What it found on its first iteration
 
