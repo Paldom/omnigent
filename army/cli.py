@@ -18,11 +18,12 @@ import logging
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from army.config import Config, load_config
 from army.lanes import Lanes
 from army.omni import OmniClient
-from army.state import CommandKind, RunState
+from army.state import CommandKind, Run, RunState
 from army.store import Store
 from army.supervisor import Supervisor
 
@@ -116,7 +117,10 @@ def cmd_status(config: Config, args: argparse.Namespace) -> int:
             print(f"{run.id[:12]}  {question}")
             if options:
                 print(f"{'':14}options: {', '.join(str(o) for o in options)}")
-            print(f"{'':14}army approve {run.id[:12]} --choice <option>")
+            if run.artifacts.get("multi_select"):
+                print(f"{'':14}army approve {run.id[:12]} --choice <option> [--choice ...]")
+            else:
+                print(f"{'':14}army approve {run.id[:12]} --choice <option>")
     return 0
 
 
@@ -128,7 +132,7 @@ def cmd_answer(config: Config, args: argparse.Namespace) -> int:
     tick, so answering while nothing is running is fine and normal.
 
     :param config: Resolved configuration.
-    :param args: Parsed arguments; uses ``run`` and ``--choice``.
+    :param args: Parsed arguments; uses ``run``, ``--choice`` and ``--text``.
     :returns: Process exit code.
     """
     store, supervisor = _build(config)
@@ -141,10 +145,59 @@ def cmd_answer(config: Config, args: argparse.Namespace) -> int:
         return 1
 
     kind = CommandKind.APPROVE if args.command == "approve" else CommandKind.DENY
-    payload = {"choice": args.choice} if getattr(args, "choice", None) else {}
+    payload, refusal = _answer_payload(run, args)
+    if refusal is not None and kind is CommandKind.APPROVE:
+        print(refusal, file=sys.stderr)
+        return 1
+    if refusal is not None:
+        # A decline needs no options to be a decline. Refusing to record one
+        # over a mistyped flag would leave the thing they are trying to stop
+        # running, which is the wrong way for this to fail.
+        print(f"{refusal} — recording the decline anyway", file=sys.stderr)
+        payload = {}
     supervisor.answer(run.id, kind, payload)
     print(f"recorded {kind.value} for {run.id[:12]}; the loop applies it on its next tick")
     return 0
+
+
+def _answer_payload(run: Run, args: argparse.Namespace) -> tuple[dict[str, Any], str | None]:
+    """
+    Build the command payload for a verdict, or say why it is not an answer.
+
+    Choices are checked against what the gate actually offered. An option the
+    question never listed is a typo or a stale terminal, and recording it would
+    park the run again one tick later with the workload rejecting it — better to
+    say so now, while the person is still here to retype it.
+
+    :param run: The parked run being answered.
+    :param args: Parsed arguments; uses ``--choice`` and ``--text``.
+    :returns: ``(payload, refusal)``. *refusal* is ``None`` when the answer
+        stands.
+    """
+    chosen: list[str] = []
+    for raw in getattr(args, "choice", None) or []:
+        option = str(raw)
+        if option not in chosen:
+            chosen.append(option)
+    text = getattr(args, "text", None)
+    offered = [str(o) for o in (run.artifacts.get("options") or [])]
+    unknown = [c for c in chosen if offered and c not in offered]
+    if unknown:
+        listed = ", ".join(offered)
+        return {}, f"not an option: {', '.join(unknown)}. this gate offers: {listed}"
+    if len(chosen) > 1 and not run.artifacts.get("multi_select"):
+        return {}, (
+            f"run {run.id[:12]} takes one choice, not {len(chosen)}. "
+            "pick one, or answer a gate that accepts several"
+        )
+    payload: dict[str, Any] = {}
+    if chosen:
+        payload["choices"] = chosen
+        if len(chosen) == 1:
+            payload["choice"] = chosen[0]
+    if text:
+        payload["text"] = str(text)
+    return payload, None
 
 
 def cmd_resume(config: Config, args: argparse.Namespace) -> int:
@@ -253,7 +306,18 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_text in (("approve", "approve a parked run"), ("deny", "decline it")):
         answer = sub.add_parser(name, help=help_text, parents=[common])
         answer.add_argument("run", help="run id or unambiguous prefix")
-        answer.add_argument("--choice", help="which option, for a multi-option question")
+        answer.add_argument(
+            "--choice",
+            action="append",
+            help=(
+                "which option. repeat it on a gate that accepts several; "
+                "a pick-one gate refuses a second"
+            ),
+        )
+        answer.add_argument(
+            "--text",
+            help="a free-form answer, for a gate that asked for more than a pick",
+        )
         answer.set_defaults(func=cmd_answer)
 
     resume = sub.add_parser("resume", help="restart a paused run", parents=[common])

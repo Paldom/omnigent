@@ -411,11 +411,19 @@ class Supervisor:
     def _ask(self, run: Run, *, now: int) -> Run | None:
         """Put the question to the human and park on the answer."""
         question, options, evidence = self.workload.evaluate(run)
+        multi_select = bool(getattr(self.workload, "multi_select", False))
         session_id = _asking_session(run)
         if session_id is None:
             return self._fail(run, "no session to raise the approval on", now=now)
         try:
-            approval_id = self.omni.ask(run.id, session_id, question, options, evidence=evidence)
+            approval_id = self.omni.ask(
+                run.id,
+                session_id,
+                question,
+                options,
+                multi_select=multi_select,
+                evidence=evidence,
+            )
         except OmniError as exc:
             if exc.is_transient:
                 _logger.warning("could not raise approval for run %s: %s", run.id, exc)
@@ -424,7 +432,12 @@ class Supervisor:
         return self.store.transition(
             run,
             RunState.WAITING_HUMAN,
-            artifacts={**run.artifacts, "question": question, "options": options},
+            artifacts={
+                **run.artifacts,
+                "question": question,
+                "options": options,
+                "multi_select": multi_select,
+            },
             approval_id=approval_id,
             now=now,
         )
@@ -499,19 +512,31 @@ class Supervisor:
             return None
 
         options = [str(o) for o in (run.artifacts.get("options") or [])]
+        multi = bool(run.artifacts.get("multi_select"))
         for reply in replies:
             matched = _options_named_in(reply, options)
-            if len(matched) > 1:
-                # Two options named: "merge or iterate?" is a question, not an
-                # answer. Leave it parked and let them say it again.
+            if len(matched) > 1 and not multi:
+                # Two options named on a pick-one gate: "merge or iterate?" is a
+                # question, not an answer. Leave it parked and let them say it
+                # again.
                 continue
-            if len(matched) == 1:
-                option, negated = matched[0]
-                if negated:
-                    _logger.info("run %s declined in chat: not %s", run.id, option)
+            if matched:
+                chosen = [option for option, negated in matched if not negated]
+                if not chosen:
+                    # Every option they named, they named to refuse.
+                    named = ", ".join(option for option, _ in matched)
+                    _logger.info("run %s declined in chat: not %s", run.id, named)
                     return self.answer(run.id, CommandKind.DENY, {}, now=now)
-                _logger.info("run %s answered in chat: %s", run.id, option)
-                return self.answer(run.id, CommandKind.APPROVE, {"choice": option}, now=now)
+                if multi and _refusal_or_question(reply, options):
+                    # Naming options is not the same as choosing them. A
+                    # refusal whose scope is unclear ("I don't want popcorn or
+                    # pretzels" attaches its "don't" to neither), a refusal
+                    # word anywhere ("reject popcorn and pretzels"), or a
+                    # question ("popcorn or pretzels — which do you
+                    # recommend?") all park instead.
+                    continue
+                _logger.info("run %s answered in chat: %s", run.id, ", ".join(chosen))
+                return self.answer(run.id, CommandKind.APPROVE, _choice_payload(chosen), now=now)
             # Only fall back to bare refusal words when no option was named, and
             # never let one double as an option — "stop" is a deny word in
             # general and a legitimate choice in this workload.
@@ -572,7 +597,9 @@ class Supervisor:
 
 #: Words that refuse without naming an option. Any that is also an offered
 #: option is dropped at match time — a workload may legitimately offer "stop".
-_DENY_WORDS: frozenset[str] = frozenset({"deny", "reject", "decline", "no", "stop", "abort"})
+_DENY_WORDS: frozenset[str] = frozenset(
+    {"deny", "reject", "refuse", "decline", "no", "stop", "abort"}
+)
 
 #: Words that invert the option immediately after them.
 _NEGATIONS: frozenset[str] = frozenset({"not", "dont", "don't", "never", "no", "avoid", "without"})
@@ -581,6 +608,58 @@ _NEGATIONS: frozenset[str] = frozenset({"not", "dont", "don't", "never", "no", "
 def _words(text: str) -> list[str]:
     """Split a reply into comparable words, dropping punctuation."""
     return re.findall(r"[a-z0-9'-]+", text.lower())
+
+
+def _refusal_or_question(reply: str, options: list[str]) -> bool:
+    """
+    Whether a reply names options without actually choosing them.
+
+    Matching option names is a weak signal on its own: the same sentence shape
+    carries a refusal ("reject popcorn and pretzels"), a refusal whose scope
+    the matcher cannot see ("I don't want popcorn or pretzels" puts its
+    "don't" next to neither), and a question ("popcorn or pretzels — which do
+    you recommend?"). A pick-one gate caught all three by refusing any reply
+    that named two options; a multi-select gate has to catch them here.
+
+    A refusal word that is itself one of the offered options does not count —
+    "stop" is a refusal in general and a legitimate choice in some workloads,
+    and a gate offering "no" has to be answerable with "no".
+
+    Only multi-select gates consult this. A pick-one gate already refuses any
+    reply naming two options, which is the bail this stands in for; running it
+    there too would park "ship it, no rush" on a gate that used to take it.
+
+    :param reply: What the human typed.
+    :param options: The options that were offered.
+    :returns: ``True`` when the reply must not be read as a choice.
+    """
+    if reply.rstrip().endswith("?"):
+        return True
+    words = set(_words(reply))
+    # An offered option is a choice, not a refusal, whichever list it also
+    # appears on: a gate offering "no" has to be answerable with "no".
+    offered = {option.lower() for option in options}
+    if (_NEGATIONS - offered) & words:
+        return True
+    return bool((_DENY_WORDS - offered) & words)
+
+
+def _choice_payload(chosen: list[str]) -> dict[str, Any]:
+    """
+    The payload shape a workload reads an answer out of.
+
+    ``choices`` is always the full answer, so a multi-select workload has one
+    field to read. ``choice`` is also set when exactly one option was picked,
+    which is every single-select gate — those workloads predate multi-select
+    and must keep working untouched.
+
+    :param chosen: The options the owner picked, in offered order.
+    :returns: The command payload.
+    """
+    payload: dict[str, Any] = {"choices": list(chosen)}
+    if len(chosen) == 1:
+        payload["choice"] = chosen[0]
+    return payload
 
 
 def _options_named_in(reply: str, options: list[str]) -> list[tuple[str, bool]]:
