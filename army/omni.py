@@ -329,8 +329,17 @@ class OmniClient:
           dead worker still has to count. This is the case that matters, since
           a run parked overnight often has no live runner behind it.
 
-        Only what the *user* said. An assistant that mentions an option while
-        explaining itself must not be able to answer the question about itself.
+        Only what the *user* said, and only what a person said. An assistant
+        that mentions an option while explaining itself must not answer the
+        question about itself, and neither must a framework notice: a fired
+        timer's note and a sub-agent wake both arrive as user-role text
+        carrying agent-authored words, so ``is_meta`` items are skipped too.
+
+        This narrows the hole rather than closing it. The role is a shape, not
+        an authenticated actor — anything able to POST a message event into
+        the session still lands here. Treat the chat path as a convenience on
+        top of ``army approve``, and keep irreversible verbs behind a signed
+        grant rather than behind this.
 
         :param session_id: Session to read.
         :param marker: A line unique to the question. Everything before its
@@ -346,6 +355,13 @@ class OmniClient:
                 continue
             data = item.get("data") or {}
             if data.get("role") != "user":
+                continue
+            if data.get("is_meta"):
+                # Omnigent posts its own notices into a session as user-role
+                # messages — a timer firing with an agent-authored note, a
+                # sub-agent wake carrying an agent-chosen title. They are
+                # hidden from the transcript and they are not a person
+                # answering, so a gate must not read one as its answer.
                 continue
             said.append(_text_of(data.get("content")))
         for pending in snapshot.get("pending_inputs") or []:

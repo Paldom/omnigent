@@ -527,7 +527,7 @@ class Supervisor:
                     named = ", ".join(option for option, _ in matched)
                     _logger.info("run %s declined in chat: not %s", run.id, named)
                     return self.answer(run.id, CommandKind.DENY, {}, now=now)
-                if _refusal_or_question(reply, options):
+                if multi and _refusal_or_question(reply, options):
                     # Naming options is not the same as choosing them. A
                     # refusal whose scope is unclear ("I don't want popcorn or
                     # pretzels" attaches its "don't" to neither), a refusal
@@ -597,7 +597,9 @@ class Supervisor:
 
 #: Words that refuse without naming an option. Any that is also an offered
 #: option is dropped at match time — a workload may legitimately offer "stop".
-_DENY_WORDS: frozenset[str] = frozenset({"deny", "reject", "decline", "no", "stop", "abort"})
+_DENY_WORDS: frozenset[str] = frozenset(
+    {"deny", "reject", "refuse", "decline", "no", "stop", "abort"}
+)
 
 #: Words that invert the option immediately after them.
 _NEGATIONS: frozenset[str] = frozenset({"not", "dont", "don't", "never", "no", "avoid", "without"})
@@ -620,7 +622,12 @@ def _refusal_or_question(reply: str, options: list[str]) -> bool:
     that named two options; a multi-select gate has to catch them here.
 
     A refusal word that is itself one of the offered options does not count —
-    "stop" is a refusal in general and a legitimate choice in some workloads.
+    "stop" is a refusal in general and a legitimate choice in some workloads,
+    and a gate offering "no" has to be answerable with "no".
+
+    Only multi-select gates consult this. A pick-one gate already refuses any
+    reply naming two options, which is the bail this stands in for; running it
+    there too would park "ship it, no rush" on a gate that used to take it.
 
     :param reply: What the human typed.
     :param options: The options that were offered.
@@ -629,9 +636,11 @@ def _refusal_or_question(reply: str, options: list[str]) -> bool:
     if reply.rstrip().endswith("?"):
         return True
     words = set(_words(reply))
-    if _NEGATIONS & words:
-        return True
+    # An offered option is a choice, not a refusal, whichever list it also
+    # appears on: a gate offering "no" has to be answerable with "no".
     offered = {option.lower() for option in options}
+    if (_NEGATIONS - offered) & words:
+        return True
     return bool((_DENY_WORDS - offered) & words)
 
 

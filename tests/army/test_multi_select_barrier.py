@@ -311,3 +311,82 @@ def test_a_pick_one_gate_still_asks_for_one(store: Store) -> None:
     _drive_to_waiting(store, omni, workload)
 
     assert omni.asked_multi == [False]
+
+
+class YesNoWorkload(DemoWorkload):
+    """The commonest gate shape there is."""
+
+    name = "yesno"
+
+    def evaluate(self, run: Run) -> tuple[str, list[str], dict[str, Any]]:
+        return "Proceed?", ["yes", "no"], dict(run.artifacts)
+
+    def apply(self, run: Run, decision: str, payload: dict[str, Any]) -> tuple[str, str]:
+        if decision == "deny":
+            return "paused", "owner declined"
+        return "continue", f"owner said {payload.get('choice')}"
+
+
+def test_a_yes_no_gate_can_be_answered_no(store: Store) -> None:
+    """ "no" is an option here, not a refusal word.
+
+    The refusal guard carves out whatever the gate offered. Without that, the
+    most common gate in human-in-the-loop cannot be answered from the chat
+    path at all — the answer parks and the run waits for a person who thinks
+    they already replied.
+    """
+    omni, workload = ChattyOmni(), YesNoWorkload()
+    run = _drive_to_waiting(store, omni, workload)
+    omni.replies = ["no"]
+
+    Supervisor(store, omni, workload).tick()
+
+    after = store.get_run(run.id)
+    assert after is not None
+    assert after.state is RunState.CONTINUE
+    assert after.terminal_reason == "owner said no"
+
+
+@pytest.mark.parametrize("reply", ["ship it, no rush", "ship, why not?", "ship - no doubt"])
+def test_a_pick_one_gate_is_unchanged_by_the_refusal_guard(store: Store, reply: str) -> None:
+    """The guard belongs to multi-select gates only.
+
+    A pick-one gate already refuses any reply naming two options, which is the
+    bail the guard stands in for. Running it there too would park ordinary
+    answers that carry a stray "no" or a question mark — a silent behaviour
+    change on the path this feature was not supposed to touch.
+    """
+    omni, workload = ChattyOmni(), DemoWorkload()
+    run = _drive_to_waiting(store, omni, workload)
+    omni.replies = [reply]
+
+    Supervisor(store, omni, workload).tick()
+
+    after = store.get_run(run.id)
+    assert after is not None
+    assert after.state is not RunState.WAITING_HUMAN, f"{reply!r} should still answer"
+
+
+def test_a_framework_notice_is_not_an_answer() -> None:
+    """A fired timer and a sub-agent wake arrive as user-role text.
+
+    Both carry words the agent chose — a timer note, a child's title — and
+    both are `is_meta`, so they are hidden from the transcript while still
+    being user-role. Reading one as the answer would let an agent approve its
+    own gate through ordinary tool use.
+    """
+    from army.omni import OmniClient, barrier_marker
+
+    marker = barrier_marker("run1")
+    snapshot = {
+        "items": [
+            {"type": "message", "data": {"role": "user", "content": marker}},
+            {"type": "message", "data": {"role": "user", "content": "popcorn", "is_meta": True}},
+        ],
+        "pending_inputs": [],
+    }
+
+    omni = OmniClient(base_url="http://localhost:1")
+    omni._request = lambda *a, **k: snapshot  # type: ignore[method-assign]
+
+    assert omni.replies_after("s1", marker) == []
