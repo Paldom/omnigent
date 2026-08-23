@@ -372,3 +372,82 @@ describe("browserViewRegistry — overlay suppression (#3980)", () => {
     assert.equal(ctx.visibility.length, 0, "nothing to toggle with no active view");
   });
 });
+
+// ── storage partitions ──────────────────────────────────────────────────────
+//
+// Views are keyed per conversation but, without a partition, share one cookie
+// jar: an agent that logs into a site is logged in for every other
+// conversation too, and nothing errors — the wrong session is simply used.
+// These tests pin the seam that separates them, and the default that does not.
+
+/** Build a registry that records the webPreferences each view was made with. */
+function makePartitionedRegistry(resolvePartition) {
+  const options = [];
+  const registry = createBrowserViewRegistry({
+    WebContentsViewCtor: (opts) => {
+      options.push(opts);
+      return {
+        setBounds() {},
+        setVisible() {},
+        webContents: {
+          loadURL() {},
+          close() {},
+          removeListener() {},
+          on() {},
+          setWindowOpenHandler() {},
+        },
+      };
+    },
+    createBoundsController: createBrowserViewBoundsController,
+    attachToHost: () => {},
+    detachFromHost: () => {},
+    sendToRenderer: () => {},
+    ...(resolvePartition ? { resolvePartition } : {}),
+  });
+  return { registry, options };
+}
+
+describe("browserViewRegistry — storage partitions", () => {
+  it("shares one jar by default, which is today's behaviour", () => {
+    const ctx = makePartitionedRegistry();
+    ctx.registry.openOrNavigate("conv_1", "https://example.com");
+    assert.equal(
+      ctx.options[0].webPreferences.partition,
+      undefined,
+      "no partition unless something resolves one",
+    );
+  });
+
+  it("gives each conversation the partition its resolver returns", () => {
+    const owners = { conv_1: "persist:bot-a", conv_2: "persist:bot-b" };
+    const ctx = makePartitionedRegistry((id) => owners[id] ?? null);
+    ctx.registry.openOrNavigate("conv_1", "https://example.com");
+    ctx.registry.openOrNavigate("conv_2", "https://example.com");
+    assert.equal(ctx.options[0].webPreferences.partition, "persist:bot-a");
+    assert.equal(ctx.options[1].webPreferences.partition, "persist:bot-b");
+  });
+
+  it("puts two conversations of one bot in the same jar", () => {
+    // A disposable body may open several conversations in one iteration. They
+    // must map to ONE partition, or the bot logs itself out halfway through.
+    const ctx = makePartitionedRegistry(() => "persist:bot-a");
+    ctx.registry.openOrNavigate("conv_1", "https://example.com");
+    ctx.registry.openOrNavigate("conv_2", "https://example.com");
+    assert.equal(ctx.options[0].webPreferences.partition, ctx.options[1].webPreferences.partition);
+  });
+
+  it("treats an empty resolver answer as no partition rather than as a name", () => {
+    const ctx = makePartitionedRegistry(() => "");
+    ctx.registry.openOrNavigate("conv_1", "https://example.com");
+    assert.equal(ctx.options[0].webPreferences.partition, undefined);
+  });
+
+  it("keeps the hardening every view already had", () => {
+    const ctx = makePartitionedRegistry(() => "persist:bot-a");
+    ctx.registry.openOrNavigate("conv_1", "https://example.com");
+    const prefs = ctx.options[0].webPreferences;
+    assert.equal(prefs.nodeIntegration, false);
+    assert.equal(prefs.contextIsolation, true);
+    assert.equal(prefs.sandbox, true);
+  });
+});

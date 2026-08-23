@@ -29,6 +29,14 @@ function createBrowserViewRegistry({
   sendToRenderer, // (channel, payload) => mainWindow.webContents.send(...)
   getHostZoomFactor = () => 1,
   getHostDisplayScaleFactor = () => null,
+  // (conversationId) => partition string | null. Returns the storage partition
+  // a view should use, so two conversations that must not share cookies do not.
+  // Default null keeps today's behaviour: one shared jar for everything.
+  //
+  // SECURITY: whatever supplies this MUST derive the partition server-side from
+  // the conversation, never from anything the renderer sent. A renderer that
+  // can name its own partition can ask for someone else's logged-in session.
+  resolvePartition = () => null,
   cap = DEFAULT_CAP,
 } = {}) {
   const entries = new Map(); // conversationId -> BrowserViewEntry
@@ -106,11 +114,17 @@ function createBrowserViewRegistry({
     if (entries.size >= cap) {
       return { ok: false, error: "browser view cap reached — close one", cap };
     }
+    // Views are keyed per conversation but, without a partition, share one
+    // cookie jar — so an agent logged into a site is logged in for every other
+    // conversation too, silently. A partition is the only thing that separates
+    // them; `persist:` prefixes survive a restart, which is the point.
+    const partition = resolvePartition(conversationId) || undefined;
     const view = WebContentsViewCtor({
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
         sandbox: true,
+        ...(partition ? { partition } : {}),
       },
     });
     const entry = makeEntry(conversationId, view);

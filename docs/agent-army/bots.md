@@ -308,6 +308,23 @@ inspects environment variables and a CLI login lives in a config file.
 > bot — and the failure is silent. Unauthenticated browsing stays allowed. Set
 > `[bots] browser_partitioned = true` once the Electron side passes a partition.
 
+### What is done, and what is not
+
+`browserViewRegistry` now takes a `resolvePartition(conversationId)` and passes
+the answer to the view, so the *mechanism* exists and is tested. It defaults to
+today's shared jar.
+
+What does **not** exist yet is the thing that makes it safe: a
+**server-authoritative** conversation→bot mapping. The registry is handed a
+`conversationId` by the renderer, and a bot may own several conversations in one
+iteration, so resolving the partition needs an answer the server gives — not one
+the renderer supplies, because a renderer that can name its own partition can
+ask for another bot's logged-in session.
+
+Until that mapping is threaded through the API and IPC boundary, the refusal
+above is the control that actually holds. Turning `browser_partitioned` on
+before then would remove the refusal without providing the isolation.
+
 **Take the wheel** follows OpenBot including the part people get wrong: while a
 human is driving, bot actions are **refused, not queued**. A queued action would
 run against whatever page the person navigated to.
