@@ -401,3 +401,37 @@ def test_a_fabricated_request_object_cannot_downgrade_an_owner_verb(
 
     with pytest.raises(ApprovalRefused, match="owner"):
         site.approvals.decide(forged, approved=True, decided_by="x", now=NOW, choice="pay")
+
+
+def _origin_check(headers: dict[str, str]) -> bool:
+    """Drive the handler's cross-site check with a given set of headers."""
+    from army.bots.web import _Handler
+
+    class Probe(_Handler):
+        def __init__(self) -> None:
+            self.headers = headers  # type: ignore[assignment]
+
+    return Probe()._same_origin()
+
+
+def test_a_browsers_own_form_post_is_not_mistaken_for_a_cross_site_one() -> None:
+    """Chrome sends `Origin: null` for a form POST from a plain-HTTP page.
+
+    Treating a present-but-null Origin as a mismatch rejected the page's own
+    buttons — every approve click returned 403, which the walkthrough recording
+    is what caught.
+    """
+    assert _origin_check({"Origin": "null", "Host": "127.0.0.1:6768"}) is True
+    assert _origin_check({"Sec-Fetch-Site": "same-origin"}) is True
+    assert _origin_check({"Sec-Fetch-Site": "none"}) is True
+
+
+def test_a_genuine_cross_site_post_is_still_refused() -> None:
+    """The check is defence in depth, but it has to actually work."""
+    assert _origin_check({"Sec-Fetch-Site": "cross-site"}) is False
+    assert _origin_check({"Origin": "https://evil.example", "Host": "127.0.0.1:6768"}) is False
+
+
+def test_a_client_that_sends_no_origin_at_all_is_allowed() -> None:
+    """curl with the token is a legitimate caller; the token is the control."""
+    assert _origin_check({"Host": "127.0.0.1:6768"}) is True

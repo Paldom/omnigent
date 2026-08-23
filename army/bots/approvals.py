@@ -157,12 +157,26 @@ class ApprovalStore:
         leaves those verbs unanswerable, which is the correct posture for a
         deployment that has not set ``ARMY_BROKER_KEY``: refusing is safe,
         pretending is not.
+    :param messages: The channel, so every decision is written there in the
+        same transaction as the command it produced — whichever front door
+        took it.
     """
 
-    def __init__(self, bots: BotStore, broker: Broker | None = None) -> None:
+    def __init__(
+        self,
+        bots: BotStore,
+        broker: Broker | None = None,
+        messages: Any = None,
+    ) -> None:
         self.bots = bots
         self.store = bots.store
         self.broker = broker
+        # The channel, so a decision is recorded in one place rather than by
+        # whichever front door happened to take it. Leaving that to the callers
+        # meant a verdict decided through the API left no trace at all, and the
+        # continuity a fresh body is given lost the most expensive thing to
+        # forget: what the human already said no to.
+        self.messages = messages
         with self.store.atomic() as conn:
             for statement in _statements(_SCHEMA):
                 conn.execute(statement)
@@ -365,6 +379,21 @@ class ApprovalStore:
                     f"approval {request.id[:12]} was decided by someone else first"
                 )
             self.store.record_command(command, conn=conn)
+            if self.messages is not None:
+                from army.bots.messages import MessageKind
+
+                self.messages.post(
+                    request.bot_id,
+                    decided_by,
+                    MessageKind.VERDICT,
+                    ("Approved" if approved else "Denied") + (f": {choice}" if choice else ""),
+                    now=now,
+                    payload={"approval_id": request.id, "approved": approved},
+                    thread_id=request.thread_id,
+                    run_id=request.run_id,
+                    command_id=command.id,
+                    conn=conn,
+                )
         return command
 
     def _check_bindings(

@@ -30,7 +30,7 @@ from army.bots.model import (
     assert_legal_bot_move,
     dumps,
 )
-from army.bots.schedule import Wake
+from army.bots.schedule import Wake, first_wake
 from army.state import loads
 from army.store import ConcurrentTransition, Store, add_missing_columns
 
@@ -533,8 +533,10 @@ class BotStore:
         :param bot: The bot, carrying the version it was read at.
         :param target: Where to move it.
         :param now: Epoch seconds.
-        :param wake: The wake to install with the move, normally from
-            :func:`army.bots.schedule.first_wake` on an activation.
+        :param wake: The wake to install with the move. On an activation this
+            defaults to :func:`army.bots.schedule.first_wake`, because a bot
+            that is active with nothing scheduling it is indistinguishable from
+            one whose succession was lost.
         :param conn: Join an open transaction, or ``None``.
         :returns: The bot, updated.
         :raises IllegalBotMove: If the move is not defined.
@@ -556,6 +558,12 @@ class BotStore:
                 bot.wake = phased
                 columns += ", wake = ?"
                 params.append(dumps(phased.to_dict()))
+            if wake is None:
+                # Activating *is* scheduling. Leaving the caller to remember
+                # produced an ACTIVE bot with no next wake and no reason for
+                # having none — which the stalled scan then reports, correctly,
+                # as a lost succession, on a bot that was simply switched on.
+                wake = first_wake(bot.wake, now=now)
         if wake is not None:
             columns += ", next_due_at = ?, wake_reason = ?, idle_streak = ?, error_streak = ?"
             params += [

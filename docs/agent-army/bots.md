@@ -11,6 +11,14 @@ spawned for one run and released at the end of it, so a reboot costs nothing, a
 bot waiting on a person holds no seat, and the whole fleet's state is one SQLite
 file you can back up.
 
+![Answering a bound approval, and the loop applying it from another process](media/bots-walkthrough.gif)
+
+*A real fleet, a real question, and a real `army bots run --once` in a second
+process while the page is open — the roster moves because the file did.
+Full walkthrough: [`media/bots-walkthrough.mp4`](media/bots-walkthrough.mp4)
+(1m 46s). How it was made, and the bug recording it found:
+[`media/bots-walkthrough/`](media/bots-walkthrough/).*
+
 ---
 
 ## Five minutes, no vendor

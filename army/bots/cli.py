@@ -22,7 +22,7 @@ import yaml
 from army.bots.approvals import ApprovalRefused, ApprovalStore, owner_broker
 from army.bots.budget import BudgetExhausted, BudgetStore
 from army.bots.definition import EXAMPLE, InvalidDefinition, load_file, to_bot, to_yaml
-from army.bots.messages import MessageKind, MessageStore
+from army.bots.messages import MessageStore
 from army.bots.model import Bot, BotStatus, DerivedStatus, IllegalBotMove
 from army.bots.precondition import PreconditionRegistry
 from army.bots.registry import WorkloadRegistry
@@ -58,12 +58,14 @@ def _open(config: Config) -> tuple[Store, BotStore]:
 def _channel(config: Config) -> tuple[BotStore, MessageStore, ApprovalStore]:
     """Open the bot tables, the channel and the approval ledger."""
     _, bots = _open(config)
-    return bots, MessageStore(bots), ApprovalStore(bots, owner_broker(bots))
+    messages = MessageStore(bots)
+    return bots, messages, ApprovalStore(bots, owner_broker(bots), messages=messages)
 
 
 def _fleet(config: Config) -> tuple[Store, BotStore, BotSupervisor]:
     """Wire a supervisor that can drive the whole roster."""
     store, bots = _open(config)
+    messages = MessageStore(bots)
     lanes = (
         Lanes.from_config(config.lanes, limit_phrases=config.limit_phrases)
         if config.lanes
@@ -77,8 +79,8 @@ def _fleet(config: Config) -> tuple[Store, BotStore, BotSupervisor]:
         preconditions=PreconditionRegistry(),
         lanes=lanes,
         max_concurrent_runs=config.max_concurrent_runs,
-        messages=MessageStore(bots),
-        approvals=ApprovalStore(bots, owner_broker(bots)),
+        messages=messages,
+        approvals=ApprovalStore(bots, owner_broker(bots), messages=messages),
         budgets=BudgetStore(bots),
     )
     return store, bots, supervisor
@@ -120,7 +122,9 @@ def cmd_verdict(config: Config, args: argparse.Namespace) -> int:
     :param args: Uses ``approval``, ``--choice`` and ``--grant``.
     :returns: Process exit code.
     """
-    _, messages, approvals = _channel(config)
+    # The ledger writes the verdict into the channel itself, so there is one
+    # place a decision is recorded whichever front door took it.
+    _, _messages, approvals = _channel(config)
     request = approvals.get(args.approval)
     if request is None:
         print(f"no approval matching {args.approval!r}", file=sys.stderr)
@@ -153,18 +157,6 @@ def cmd_verdict(config: Config, args: argparse.Namespace) -> int:
         print(f"refused: {exc}", file=sys.stderr)
         return 1
 
-    messages.post(
-        request.bot_id,
-        f"human:{_whoami()}",
-        MessageKind.VERDICT,
-        f"{'Approved' if approved else 'Denied'}"
-        + (f": {args.choice}" if getattr(args, "choice", None) else ""),
-        now=now,
-        payload={"approval_id": request.id, "approved": approved},
-        thread_id=request.thread_id,
-        run_id=request.run_id,
-        command_id=command.id,
-    )
     print(f"recorded {command.kind.value} for {request.id[:12]}; the loop applies it next tick")
     return 0
 
@@ -601,9 +593,17 @@ def cmd_serve(config: Config, args: argparse.Namespace) -> int:
     """
     store = Store(config.state_path)
     bots = BotStore(store)
+    messages = MessageStore(bots)
     token = read_or_mint_token()
+    budgets = BudgetStore(bots)
     site = BotsSite(
-        store, bots, ApprovalStore(bots, owner_broker(bots)), MessageStore(bots), token
+        store,
+        bots,
+        ApprovalStore(bots, owner_broker(bots), messages=messages),
+        messages,
+        token,
+        spawns=SpawnStore(bots, budgets),
+        budgets=budgets,
     )
     server = serve(site, host=args.host, port=args.port)
     # The link carries the token so it can be opened on a phone. It is also the

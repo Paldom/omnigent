@@ -134,6 +134,8 @@ h1,h2{margin:0;font-size:var(--text-ui);font-weight:500}
 .err{border-color:var(--status-red)}
 table{border-collapse:collapse;width:100%}
 td{padding:5px 8px 5px 0;vertical-align:top;border-top:1px solid var(--border-weak)}
+.defn{margin:8px 0 0;padding:8px 10px;background:#0000000a;border-radius:var(--radius-button);
+  font-family:var(--font-mono);font-size:var(--text-sm);white-space:pre-wrap;overflow-x:auto}
 """
 
 #: Which disc a derived status gets. Colour lives in an 8px disc and nowhere
@@ -157,6 +159,8 @@ class BotsSite:
     :param token: The shared secret every request must carry. Not a login —
         it authenticates *reaching a file bots cannot read*, which is the
         property that matters here.
+    :param spawns: Proposals from bots, or ``None`` to hide that page.
+    :param budgets: The ledger, so the roster can say what is left.
     """
 
     def __init__(
@@ -166,12 +170,16 @@ class BotsSite:
         approvals: ApprovalStore,
         messages: MessageStore,
         token: str,
+        spawns: Any = None,
+        budgets: Any = None,
     ) -> None:
         self.store = store
         self.bots = bots
         self.approvals = approvals
         self.messages = messages
         self.token = token
+        self.spawns = spawns
+        self.budgets = budgets
 
     def authorises(self, supplied: str) -> bool:
         """
@@ -204,6 +212,8 @@ class BotsSite:
             '<div class="top"><span class="wordmark">Omnigent</span>',
             f'<span class="sm mut">{_counts(counts)}</span></div>',
             "<h1>Bots</h1>",
+            f'<p class="grp"><a href="/proposals?token={_q(self.token)}">proposed bots</a>'
+            f' · <a href="/api/bots?token={_q(self.token)}">json</a></p>',
         ]
         if problem:
             body.append(f'<div class="card err"><strong>Refused.</strong> {_esc(problem)}</div>')
@@ -299,11 +309,140 @@ class BotsSite:
         return (
             '<div class="card"><div class="row">'
             f'<span class="dot {disc}"></span>'
-            f'<span><span class="name">{_esc(entry.bot.slug)}</span> '
+            f'<span><a class="name" href="/bots/{_esc(entry.bot.slug)}?token={_q(self.token)}">'
+            f"{_esc(entry.bot.slug)}</a> "
             f'<span class="sm mut">{_esc(entry.status.value)}</span>'
             f'<span class="why">{_esc(why)}</span></span>'
             f'<span class="when">{when}</span></div></div>'
         )
+
+    # ── one bot ───────────────────────────────────────────────────
+
+    def detail(self, slug: str, *, now: int) -> str | None:
+        """
+        Everything about one bot: what it is, what it did, what it said.
+
+        The three questions an operator has about a bot they are worried about,
+        in the order they ask them — what is it *for*, what has it *done*, and
+        what is it *waiting on*.
+
+        :param slug: The bot's addressable name.
+        :param now: Epoch seconds.
+        :returns: An HTML document, or ``None`` when there is no such bot.
+        """
+        bot = self.bots.by_slug(slug)
+        if bot is None:
+            return None
+        entry = next((row for row in roster(self.bots, now=now) if row.bot.id == bot.id), None)
+        status = entry.status.value if entry else "unknown"
+        delay = entry.due_in(now) if entry else None
+
+        body = [
+            f'<div class="top"><a class="sm mut" href="/bots?token={_q(self.token)}">'
+            "&larr; fleet</a>"
+            f'<span class="sm mut">{_esc(status)}'
+            f"{'' if delay is None else f' · due in {_short(delay)}'}</span></div>",
+            f"<h1>{_esc(bot.display_name)}</h1>",
+            f'<p class="mut">{_esc(bot.title or "")}</p>',
+        ]
+
+        if bot.paused_reason:
+            body.append(f'<div class="card err">Paused: {_esc(bot.paused_reason)}</div>')
+
+        body.append('<p class="grp">What it is for</p>')
+        body.append(
+            f'<div class="card">{_esc(bot.mission)}<p class="why">{_esc(bot.persona)}</p></div>'
+        )
+
+        body.append('<p class="grp">How it is scheduled</p>')
+        wake = bot.wake.to_dict()
+        body.append(
+            '<div class="card"><table>'
+            + "".join(
+                f'<tr><td class="sm mut">{_esc(key)}</td>'
+                f'<td class="mono sm">{_esc(value)}</td></tr>'
+                for key, value in sorted(wake.items())
+            )
+            + f'<tr><td class="sm mut">idle streak</td>'
+            f'<td class="mono sm">{bot.idle_streak}</td></tr>'
+            f'<tr><td class="sm mut">error streak</td>'
+            f'<td class="mono sm">{bot.error_streak}</td></tr>'
+            "</table></div>"
+        )
+
+        body.append('<p class="grp">Its iterations</p>')
+        runs = self.bots.runs_for(bot.id, limit=12)
+        if not runs:
+            body.append('<div class="empty">It has not run yet.</div>')
+        else:
+            body.append(
+                '<div class="card"><table>'
+                + "".join(
+                    f'<tr><td class="mono sm">{_esc(str(run["id"])[:12])}</td>'
+                    f'<td class="sm">{_esc(run["state"])}</td>'
+                    f'<td class="mono sm">{_esc(run["outcome"] or "—")}</td>'
+                    f'<td class="sm mut">{_esc(run["terminal_reason"] or "")}</td></tr>'
+                    for run in runs
+                )
+                + "</table></div>"
+            )
+
+        body.append('<p class="grp">Its channel</p>')
+        messages = self.messages.channel(bot.id, limit=40)
+        if not messages:
+            body.append('<div class="empty">Nothing said yet.</div>')
+        for message in messages:
+            body.append(
+                '<div class="card"><div class="row">'
+                f'<span class="dot {"act" if message.kind.value == "ask" else "idle"}"></span>'
+                f'<span><span class="sm mut">{_esc(message.kind.value)} · '
+                f"{_esc(message.author)}</span>"
+                f'<span class="why">{_esc(message.body)}</span></span>'
+                f'<span class="when">#{message.seq}</span></div></div>'
+            )
+
+        return _page(bot.slug, "".join(body))
+
+    def proposals(self, *, now: int) -> str:
+        """
+        Bots that other bots have asked for, and what they would actually get.
+
+        The rationale is what the bot says it wants. The definition is what it
+        would get, and approving the first without reading the second is how a
+        plausible sentence becomes a workload pointed somewhere it should not
+        be — so both are here, and the definition is not collapsed.
+
+        :param now: Epoch seconds.
+        :returns: An HTML document.
+        """
+        pending = self.spawns.pending() if self.spawns is not None else []
+        body = [
+            f'<div class="top"><a class="sm mut" href="/bots?token={_q(self.token)}">'
+            "&larr; fleet</a>"
+            f'<span class="sm mut">{len(pending)} proposed</span></div>',
+            "<h1>Proposed bots</h1>",
+        ]
+        if not pending:
+            body.append('<div class="empty">No bot has asked for another one.</div>')
+        for request in pending:
+            parent = self.bots.get(request.parent_bot_id)
+            definition = "\n".join(
+                f"{key}: {value}" for key, value in sorted(request.definition.items())
+            )
+            body.append(
+                '<div class="card"><div class="row"><span class="dot act"></span>'
+                f'<span><span class="name">{_esc(request.slug)}</span> '
+                f'<span class="sm mut">proposed by '
+                f"{_esc(parent.slug if parent else request.parent_bot_id[:12])} · "
+                f"{request.allowance} iterations carved from it</span>"
+                f'<span class="why">{_esc(request.rationale)}</span></span>'
+                f'<span class="when">{_short(now - request.created_at)} ago</span></div>'
+                f'<pre class="defn">{_esc(definition)}</pre>'
+                f'<p class="foot">army bots adopt {_esc(request.id[:12])} --yes'
+                "  |  army bots refuse "
+                f"{_esc(request.id[:12])}</p></div>"
+            )
+        return _page("Proposed bots", "".join(body))
 
     # ── actions ───────────────────────────────────────────────────
 
@@ -432,6 +571,14 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if route.path == "/api/bots":
             self._send(200, self.site.api(now=now), "application/json")
+        elif route.path == "/proposals":
+            self._send(200, self.site.proposals(now=now), "text/html; charset=utf-8")
+        elif route.path.startswith("/bots/"):
+            page = self.site.detail(route.path.removeprefix("/bots/"), now=now)
+            if page is None:
+                self._send(404, _page("Not found", "<h1>No such bot</h1>"), _HTML)
+            else:
+                self._send(200, page, _HTML)
         elif route.path in ("/", "/bots"):
             self._send(
                 200,
@@ -440,10 +587,10 @@ class _Handler(BaseHTTPRequestHandler):
                     notice=_NOTICES.get(_first(params, "ok"), ""),
                     problem=_NOTICES.get(_first(params, "err"), _first(params, "err")),
                 ),
-                "text/html; charset=utf-8",
+                _HTML,
             )
         else:
-            self._send(404, _page("Not found", "<h1>Not found</h1>"), "text/html; charset=utf-8")
+            self._send(404, _page("Not found", "<h1>Not found</h1>"), _HTML)
 
     def _token(self, params: dict[str, list[str]]) -> str:
         """
@@ -470,7 +617,7 @@ class _Handler(BaseHTTPRequestHandler):
                 '<span class="mono">~/.omnigent/army/web-token</span>. '
                 '<span class="mono">army bots serve</span> prints the link.</p>',
             ),
-            "text/html; charset=utf-8",
+            _HTML,
         )
 
     def do_POST(self) -> None:
@@ -493,7 +640,7 @@ class _Handler(BaseHTTPRequestHandler):
             # Cross-site request forgery. There are no cookies to be SameSite
             # about, but a form POST is a simple request needing no preflight,
             # so any page the operator opens could otherwise answer a named id.
-            self._send(403, _page("Refused", "<h1>Refused</h1>"), "text/html; charset=utf-8")
+            self._send(403, _page("Refused", "<h1>Refused</h1>"), _HTML)
             return
 
         notice, problem = self.site.verdict(form, now=int(time.time()))
@@ -510,14 +657,26 @@ class _Handler(BaseHTTPRequestHandler):
         """
         Whether the request came from this page rather than from another site.
 
-        :returns: ``True`` when the Origin is absent (a direct client, e.g.
-            curl with the token) or matches the Host this was served on.
+        ``Sec-Fetch-Site`` first, because it is the header that actually
+        answers the question and every current browser sends it. ``Origin`` is
+        the fallback for a client that does not — and an ``Origin`` of the
+        literal string ``null`` is not a mismatch: browsers send it for an
+        ordinary form POST from a plain-HTTP page, so treating it as hostile
+        rejects the page's own buttons.
+
+        This is defence in depth rather than the control. The token is not a
+        cookie, so a cross-site attacker cannot get the browser to attach it —
+        they would have to know it already, and then they need no victim.
+
+        :returns: Whether the request may be acted on.
         """
+        site = (self.headers.get("Sec-Fetch-Site") or "").lower()
+        if site:
+            return site in ("same-origin", "same-site", "none")
         origin = self.headers.get("Origin")
-        if not origin:
+        if not origin or origin == "null":
             return True
-        host = self.headers.get("Host") or ""
-        return urlparse(origin).netloc == host
+        return urlparse(origin).netloc == (self.headers.get("Host") or "")
 
     def _send(self, status: int, body: str, content_type: str) -> None:
         payload = body.encode()
@@ -576,6 +735,9 @@ def serve(
         )
     return ThreadingHTTPServer((host, port), partial(_Handler, site))
 
+
+#: The one content type this page serves.
+_HTML = "text/html; charset=utf-8"
 
 #: Confirmations the page may show, keyed by a code the redirect carries.
 #: Echoing arbitrary prose back into a card the operator trusts is a phishing
