@@ -7787,6 +7787,71 @@
         ]
       }
     },
+    "/v1/bots/{slug}/files": {
+      "get": {
+        "description": "Browse a bot's workspace, or read one file out of it.\n\nThe bot's charter, runbook, lessons and reports are real files a person\nedits to steer it, so the panel browses them. The control plane holds\nthe workspace root and refuses anything that escapes it \u2014 this only\nforwards, and deliberately does not resolve paths itself, so there is\none place where that check lives.",
+        "operationId": "files_v1_bots__slug__files_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "read",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Read",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Files V1 Bots  Slug  Files Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Files",
+        "tags": [
+          "bots"
+        ]
+      }
+    },
     "/v1/branding/logo/{variant}": {
       "get": {
         "description": "Serve a validated public branding asset, or 404 when unset.",

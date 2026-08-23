@@ -13,10 +13,12 @@ import {
   adoptDraft,
   answerApproval,
   getBot,
+  getWorkspace,
   listBots,
   signOwnerRequest,
   type BotDetail,
   type BotFleet,
+  type WorkspaceView,
 } from "@/lib/botsApi";
 
 /** Query key for the fleet. */
@@ -51,6 +53,22 @@ export function useBot(slug: string | null) {
     enabled: Boolean(slug),
     refetchInterval: 5_000,
     staleTime: 2_000,
+  });
+}
+
+/**
+ * A directory in a bot's workspace, or one file out of it.
+ *
+ * Not polled. A charter does not change while you read it, and a file tree
+ * that reshuffles under the cursor every five seconds is worse than a stale
+ * one — the refresh button is explicit.
+ */
+export function useWorkspace(slug: string | null, path: string, read = false) {
+  return useQuery<WorkspaceView>({
+    queryKey: ["bot-workspace", slug, path, read],
+    queryFn: () => getWorkspace(slug as string, path, read),
+    enabled: Boolean(slug),
+    staleTime: 30_000,
   });
 }
 

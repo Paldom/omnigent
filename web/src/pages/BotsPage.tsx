@@ -16,9 +16,19 @@
  */
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { BotIcon, FileTextIcon, FolderIcon, Loader2Icon, TriangleAlertIcon } from "lucide-react";
+import {
+  BotIcon,
+  ExternalLinkIcon,
+  FileTextIcon,
+  FolderIcon,
+  Loader2Icon,
+  TriangleAlertIcon,
+} from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import { PageScroll } from "@/components/PageScroll";
+import { Link } from "@/lib/routing";
 import { Button } from "@/components/ui/button";
 import {
   useAdoptDraft,
@@ -26,6 +36,7 @@ import {
   useBot,
   useBots,
   useSignOwnerRequest,
+  useWorkspace,
 } from "@/hooks/useBots";
 import type {
   BotApproval,
@@ -90,6 +101,22 @@ function reasonFor(bot: BotSummary): string {
   if (bot.status === "running" && bot.runId) return `run ${bot.runId.slice(0, 12)}`;
   if (bot.errorStreak) return `failed ${bot.errorStreak}× running`;
   return bot.mission;
+}
+
+/**
+ * The strip the AppShell header overlays.
+ *
+ * `h-14 md:h-12` is the header's own geometry, copied rather than derived from
+ * `--omnigent-header-height`: that variable is 3.5rem, the *mobile* height, and
+ * using it left eight pixels of dead space under a 48px desktop header — which
+ * is precisely the kind of not-quite-aligned that makes a page look wrong
+ * without anyone being able to say why.
+ *
+ * Inside each column, so each column's background reaches the top of the
+ * window and the three columns stay flush.
+ */
+function TopBand() {
+  return <div aria-hidden className="h-14 shrink-0 md:h-12" />;
 }
 
 /** An 8px disc. Colour lives here and nowhere else. */
@@ -465,6 +492,125 @@ function ChannelLine({ kind, author, body, at }: BotDetail["channel"][number]) {
   );
 }
 
+/** Bytes, in the shortest honest unit. */
+function bytes(count: number): string {
+  if (count < 1024) return `${count} B`;
+  if (count < 1024 * 1024) return `${Math.round(count / 1024)} KB`;
+  return `${(count / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * The bot's workspace — a real file browser over real files.
+ *
+ * This was a hardcoded array of three filenames, which looked like a file
+ * browser and was a picture of one. `charter.md`, `runbook.md` and
+ * `lessons.md` are the documents a person edits to steer a bot, and `reports/`
+ * is what it writes back, so they are worth browsing and reading rather than
+ * naming.
+ */
+function WorkspaceBrowser({ slug, workspace }: { slug: string; workspace: string | null }) {
+  const [path, setPath] = useState("");
+  const [open, setOpen] = useState<string | null>(null);
+  // Selecting a bot must not leave you inside the previous bot's `reports/`.
+  useEffect(() => {
+    setPath("");
+    setOpen(null);
+  }, [slug]);
+
+  const listing = useWorkspace(slug, path);
+  const file = useWorkspace(slug, open ?? "", Boolean(open));
+
+  if (open) {
+    const markdown = open.endsWith(".md");
+    return (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex shrink-0 items-center gap-2 border-b border-border px-2.5 py-1.5">
+          <button
+            type="button"
+            onClick={() => setOpen(null)}
+            className="rounded-otto-button px-1.5 py-0.5 text-muted-foreground hover:bg-muted"
+          >
+            ← back
+          </button>
+          <span className="truncate font-mono text-sm">{open}</span>
+          {file.data?.bytes != null && (
+            <span className="ml-auto shrink-0 font-mono text-muted-foreground text-sm">
+              {bytes(file.data.bytes)}
+            </span>
+          )}
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-2">
+          {file.isLoading && <Loader2Icon className="size-4 animate-spin text-muted-foreground" />}
+          {file.data?.reason && <p className="text-muted-foreground text-sm">{file.data.reason}</p>}
+          {file.data?.text != null &&
+            (markdown ? (
+              // Same pipeline as the notebook preview, so a charter reads the
+              // way every other markdown surface in the product reads.
+              <div className="prose dark:prose-invert prose-sm max-w-none">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{file.data.text}</ReactMarkdown>
+              </div>
+            ) : (
+              <pre className="font-mono text-sm break-words whitespace-pre-wrap">
+                {file.data.text}
+              </pre>
+            ))}
+        </div>
+      </div>
+    );
+  }
+
+  const up = path === "" ? null : path.split("/").slice(0, -1).join("/");
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border px-2.5 py-1.5">
+        {up !== null && (
+          <button
+            type="button"
+            onClick={() => setPath(up)}
+            className="rounded-otto-button px-1.5 py-0.5 text-muted-foreground hover:bg-muted"
+          >
+            ← up
+          </button>
+        )}
+        <span className="truncate font-mono text-muted-foreground text-sm">
+          {path || (workspace ?? `~/bots/${slug}`)}
+        </span>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-1.5">
+        {listing.isLoading && <Loader2Icon className="size-4 animate-spin text-muted-foreground" />}
+        {listing.data?.reason && (
+          <p className="text-muted-foreground text-sm">{listing.data.reason}</p>
+        )}
+        {listing.data?.entries?.length === 0 && (
+          <p className="text-muted-foreground text-sm">Nothing here.</p>
+        )}
+        {listing.data?.entries?.map((entry) => (
+          <button
+            key={entry.path}
+            type="button"
+            onClick={() => (entry.dir ? setPath(entry.path) : setOpen(entry.path))}
+            className="flex w-full items-center gap-2 rounded-otto-sm px-1 py-1 text-left hover:bg-muted"
+          >
+            {entry.dir ? (
+              <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />
+            ) : (
+              <FileTextIcon className="size-3.5 shrink-0 text-muted-foreground" />
+            )}
+            <span className="truncate font-mono text-sm">{entry.name}</span>
+            <span className="ml-auto shrink-0 font-mono text-muted-foreground text-sm">
+              {entry.dir ? "" : bytes(entry.bytes ?? 0)}
+            </span>
+          </button>
+        ))}
+        <p className="mt-2.5 text-muted-foreground text-sm">
+          The content lives in git; <code className="font-mono">bot_docs</code> only indexes it, so
+          history and review stay where they already work.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function Dock({
   bot,
   tab,
@@ -478,8 +624,10 @@ function Dock({
   // choice was lost every time the poll briefly cleared `detail.data` and this
   // unmounted — a panel that resets itself under you while you read it.
   return (
-    <div className="flex min-h-0 flex-col border-l border-border">
-      <div className="flex items-center gap-1 border-b border-border px-2 py-1.5">
+    // `h-11` matches the roster and channel headers, so the three columns
+    // share one horizontal rule instead of three that nearly line up.
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex h-11 shrink-0 items-center gap-1 border-b border-border px-3">
         {DOCK_TABS.map((entry) => (
           <button
             key={entry.value}
@@ -496,77 +644,74 @@ function Dock({
         ))}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-2">
-        {tab === "files" && (
-          <>
-            <p className="m-0 font-mono text-muted-foreground text-sm">
-              {bot.workspace ?? `~/bots/${bot.slug}`}
-            </p>
-            {["charter.md", "runbook.md", "lessons.md"].map((name) => (
-              <div key={name} className="flex items-center gap-2 py-1">
-                <FileTextIcon className="size-3.5 shrink-0 self-center text-muted-foreground" />
-                <span className="truncate font-mono text-sm">{name}</span>
-              </div>
-            ))}
-            <div className="flex items-center gap-2 py-1">
-              <FolderIcon className="size-3.5 shrink-0 self-center text-muted-foreground" />
-              <span className="truncate font-mono text-sm">reports/</span>
-            </div>
-            <p className="mt-2.5 text-muted-foreground text-sm">
-              The content lives in git; <code className="font-mono">bot_docs</code> only indexes it,
-              so history and review stay where they already work.
-            </p>
-          </>
-        )}
+      {/* Files owns its own scrolling — it has a sticky breadcrumb and a
+          preview that must not scroll with the tree above it. */}
+      {tab === "files" && <WorkspaceBrowser slug={bot.slug} workspace={bot.workspace} />}
 
-        {tab === "runs" && (
-          <>
-            {bot.runs.length === 0 && (
-              <p className="text-muted-foreground text-sm">It has not run yet.</p>
-            )}
-            {bot.runs.map((run) => (
-              <div
-                key={run.id}
-                className="grid grid-cols-[auto_1fr] gap-x-2 border-t border-[var(--border-weak)] py-1.5 first:border-t-0"
-              >
-                <span className="font-mono text-sm">{run.id.slice(0, 8)}</span>
-                <span className="min-w-0">
-                  <span className="block truncate">
-                    {(run.outcome ?? run.state).replace(/_/g, " ")}
+      {tab !== "files" && (
+        <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-2">
+          {tab === "runs" && (
+            <>
+              {bot.runs.length === 0 && (
+                <p className="text-muted-foreground text-sm">It has not run yet.</p>
+              )}
+              {bot.runs.map((run) => (
+                <div
+                  key={run.id}
+                  className="grid grid-cols-[auto_1fr] gap-x-2 border-t border-[var(--border-weak)] py-1.5 first:border-t-0"
+                >
+                  <span className="font-mono text-sm">{run.id.slice(0, 8)}</span>
+                  <span className="min-w-0">
+                    <span className="block truncate">
+                      {(run.outcome ?? run.state).replace(/_/g, " ")}
+                    </span>
+                    <span className="block truncate text-muted-foreground text-sm">
+                      {run.reason ?? run.state}
+                    </span>
+                    {/* The iteration's own session. A bot's body is an ordinary
+                      conversation, so this is a link to the real chat page —
+                      transcript, tool calls, files, terminals and all. */}
+                    {run.sessionId && (
+                      <Link
+                        to={`/c/${run.sessionId}`}
+                        className="mt-0.5 inline-flex items-center gap-1 text-muted-foreground text-sm underline-offset-2 hover:text-foreground hover:underline"
+                      >
+                        <ExternalLinkIcon className="size-3" />
+                        open session
+                      </Link>
+                    )}
                   </span>
-                  <span className="block truncate text-muted-foreground text-sm">
-                    {run.reason ?? run.state}
-                  </span>
-                </span>
-              </div>
-            ))}
-            <p className="mt-2.5 text-muted-foreground text-sm">
-              <code className="font-mono">next_due_at</code> is null while blocked, so a waiting bot
-              costs nothing. Answering writes the verdict and the successor wake in one transaction.
-            </p>
-          </>
-        )}
+                </div>
+              ))}
+              <p className="mt-2.5 text-muted-foreground text-sm">
+                <code className="font-mono">next_due_at</code> is null while blocked, so a waiting
+                bot costs nothing. Answering writes the verdict and the successor wake in one
+                transaction.
+              </p>
+            </>
+          )}
 
-        {tab === "setup" && (
-          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
-            {[
-              ["workload", bot.workload],
-              ["harness", bot.harness ?? "router picks"],
-              ["partition", bot.browserProfile ?? "—"],
-              ["idle streak", String(bot.idleStreak)],
-              ["error streak", String(bot.errorStreak)],
-              ...Object.entries(bot.wake).map(
-                ([key, value]) => [key, JSON.stringify(value)] as [string, string],
-              ),
-            ].map(([key, value]) => (
-              <div key={key} className="contents">
-                <dt className="text-muted-foreground">{key}</dt>
-                <dd className="m-0 font-mono break-all">{value}</dd>
-              </div>
-            ))}
-          </dl>
-        )}
-      </div>
+          {tab === "setup" && (
+            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+              {[
+                ["workload", bot.workload],
+                ["harness", bot.harness ?? "router picks"],
+                ["partition", bot.browserProfile ?? "—"],
+                ["idle streak", String(bot.idleStreak)],
+                ["error streak", String(bot.errorStreak)],
+                ...Object.entries(bot.wake).map(
+                  ([key, value]) => [key, JSON.stringify(value)] as [string, string],
+                ),
+              ].map(([key, value]) => (
+                <div key={key} className="contents">
+                  <dt className="text-muted-foreground">{key}</dt>
+                  <dd className="m-0 font-mono break-all">{value}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -614,6 +759,11 @@ export function BotsPage() {
   const answer = useAnswerApproval(slug);
   const sign = useSignOwnerRequest(slug);
   const adopt = useAdoptDraft();
+
+  // The most recent iteration that had a body. Newest-first from the store, so
+  // the first hit is the one to open — a bot between iterations still links to
+  // where it last worked, which is what you want when it just failed.
+  const liveSession = detail.data?.runs.find((entry) => entry.sessionId)?.sessionId ?? null;
 
   // Open on the most consequential thing waiting: a signature commits money and
   // is irreversible, a question only gates an iteration, and a proposal creates
@@ -681,113 +831,115 @@ export function BotsPage() {
   }
 
   return (
-    // The three columns scroll independently, so this cannot be a PageScroll —
-    // but it owes the same debt: the AppShell header is absolute and would
-    // otherwise sit on top of the first row of every column, swallowing clicks
-    // on the roster and the dock tabs. Same variables, applied to the grid.
+    // The three columns scroll independently, so this cannot be a PageScroll.
+    // The AppShell header is an absolute overlay across the top of this whole
+    // region, so every column opens with a `TopBand` spacer of exactly its
+    // height. Padding the *grid* instead — which is what this did — left the
+    // band outside all three columns, so the roster's tint stopped short of
+    // the top and the page had a white stripe across it.
     <div
-      className="grid h-full min-h-0 grid-cols-[264px_minmax(0,1fr)] xl:grid-cols-[264px_minmax(0,1fr)_320px]"
-      style={{
-        paddingTop: "calc(var(--omnigent-header-height) + var(--omnigent-inset-top))",
-        paddingBottom: "var(--omnigent-inset-bottom)",
-      }}
+      className="grid h-full min-h-0 grid-cols-[276px_minmax(0,1fr)] xl:grid-cols-[276px_minmax(0,1fr)_340px]"
+      style={{ paddingBottom: "var(--omnigent-inset-bottom)" }}
     >
       {/* ── roster ─────────────────────────────────────────────── */}
-      <div className="flex min-h-0 flex-col overflow-y-auto border-r border-border bg-sidebar px-3 pb-3">
-        <div className="flex items-baseline justify-between px-2 pt-3.5 pb-1.5">
+      <div className="flex min-h-0 flex-col border-r border-border bg-sidebar">
+        <TopBand />
+        <div className="flex h-11 shrink-0 items-center justify-between border-b border-border px-5">
           <span className="flex items-center gap-2 font-medium">
             <BotIcon className="size-3.5 text-muted-foreground" />
             Bots
           </span>
           <span className="text-muted-foreground text-sm">{rows.length}</span>
         </div>
-
-        {/* Ordered by consequence, not by kind: a signature moves money and
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 pt-1 pb-3">
+          {/* Ordered by consequence, not by kind: a signature moves money and
             cannot be taken back, a question only gates an iteration, and a
             proposal has created nothing yet. */}
-        {owner.length > 0 && (
-          <>
-            <p className="px-2 pt-2.5 pb-1 text-muted-foreground text-sm">Owner approvals</p>
-            {owner.map((request) => (
-              <Row
-                key={request.id}
-                disc={
-                  <span
-                    aria-hidden
-                    className="mt-[7px] size-2 shrink-0 rounded-full bg-[var(--status-red)]"
-                  />
-                }
-                name={request.verb.replace(/_/g, " ")}
-                suffix={String(request.evidence.amount ?? request.evidence.usd ?? "")}
-                reason={`${request.bot} · needs your signature`}
-                when={ago(request.createdAt).replace(" ago", "")}
-                active={request.id === selectedId(selection, "owner")}
-                onSelect={() => setSelection({ kind: "owner", id: request.id })}
-              />
-            ))}
-          </>
-        )}
+          {owner.length > 0 && (
+            <>
+              <p className="px-2 pt-2.5 pb-1 text-muted-foreground text-sm">Owner approvals</p>
+              {owner.map((request) => (
+                <Row
+                  key={request.id}
+                  disc={
+                    <span
+                      aria-hidden
+                      className="mt-[7px] size-2 shrink-0 rounded-full bg-[var(--status-red)]"
+                    />
+                  }
+                  name={request.verb.replace(/_/g, " ")}
+                  suffix={String(request.evidence.amount ?? request.evidence.usd ?? "")}
+                  reason={`${request.bot} · needs your signature`}
+                  when={ago(request.createdAt).replace(" ago", "")}
+                  active={request.id === selectedId(selection, "owner")}
+                  onSelect={() => setSelection({ kind: "owner", id: request.id })}
+                />
+              ))}
+            </>
+          )}
 
-        {needsYou.length > 0 && (
-          <>
-            <p className="px-2 pt-2.5 pb-1 text-muted-foreground text-sm">Needs you</p>
-            {needsYou.map((bot) => (
-              <RosterRow
-                key={bot.slug}
-                bot={bot}
-                active={selection?.kind === "bot" && bot.slug === selection.slug}
-                onSelect={() => setSelection({ kind: "bot", slug: bot.slug })}
-              />
-            ))}
-          </>
-        )}
+          {needsYou.length > 0 && (
+            <>
+              <p className="px-2 pt-2.5 pb-1 text-muted-foreground text-sm">Needs you</p>
+              {needsYou.map((bot) => (
+                <RosterRow
+                  key={bot.slug}
+                  bot={bot}
+                  active={selection?.kind === "bot" && bot.slug === selection.slug}
+                  onSelect={() => setSelection({ kind: "bot", slug: bot.slug })}
+                />
+              ))}
+            </>
+          )}
 
-        {drafts.length > 0 && (
-          <>
-            <p className="px-2 pt-2.5 pb-1 text-muted-foreground text-sm">Draft</p>
-            {drafts.map((entry) => (
-              <Row
-                key={entry.id}
-                disc={
-                  <span
-                    aria-hidden
-                    className="mt-[7px] size-2 shrink-0 rounded-full border-[1.5px] border-[var(--status-yellow)]"
-                  />
-                }
-                name={entry.slug}
-                suffix="draft"
-                reason={`proposed by ${entry.parent}`}
-                when={ago(entry.createdAt).replace(" ago", "")}
-                active={entry.id === selectedId(selection, "draft")}
-                onSelect={() => setSelection({ kind: "draft", id: entry.id })}
-              />
-            ))}
-          </>
-        )}
+          {drafts.length > 0 && (
+            <>
+              <p className="px-2 pt-2.5 pb-1 text-muted-foreground text-sm">Draft</p>
+              {drafts.map((entry) => (
+                <Row
+                  key={entry.id}
+                  disc={
+                    <span
+                      aria-hidden
+                      className="mt-[7px] size-2 shrink-0 rounded-full border-[1.5px] border-[var(--status-yellow)]"
+                    />
+                  }
+                  name={entry.slug}
+                  suffix="draft"
+                  reason={`proposed by ${entry.parent}`}
+                  when={ago(entry.createdAt).replace(" ago", "")}
+                  active={entry.id === selectedId(selection, "draft")}
+                  onSelect={() => setSelection({ kind: "draft", id: entry.id })}
+                />
+              ))}
+            </>
+          )}
 
-        <p className="px-2 pt-2.5 pb-1 text-muted-foreground text-sm">Bots</p>
-        {quiet.map((bot) => (
-          <RosterRow
-            key={bot.slug}
-            bot={bot}
-            active={selection?.kind === "bot" && bot.slug === selection.slug}
-            onSelect={() => setSelection({ kind: "bot", slug: bot.slug })}
-          />
-        ))}
-        {rows.length === 0 && (
-          <p className="px-2 text-muted-foreground text-sm">
-            No bots yet. <span className="font-mono">army bots example</span>
-          </p>
-        )}
+          <p className="px-2 pt-2.5 pb-1 text-muted-foreground text-sm">Bots</p>
+          {quiet.map((bot) => (
+            <RosterRow
+              key={bot.slug}
+              bot={bot}
+              active={selection?.kind === "bot" && bot.slug === selection.slug}
+              onSelect={() => setSelection({ kind: "bot", slug: bot.slug })}
+            />
+          ))}
+          {rows.length === 0 && (
+            <p className="px-2 text-muted-foreground text-sm">
+              No bots yet. <span className="font-mono">army bots example</span>
+            </p>
+          )}
+        </div>
       </div>
 
       {/* ── channel ────────────────────────────────────────────── */}
       <div className="flex min-h-0 flex-col">
-        <div className="flex items-baseline gap-2 border-b border-border px-4 py-2.5">
-          <h1 className="font-medium">
+        <TopBand />
+        <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-5">
+          <h1 className="shrink-0 font-medium">
             {draft ? draft.slug : ownerRequest ? "Owner approvals" : (detail.data?.slug ?? "Bots")}
           </h1>
-          <span className="flex items-center gap-1.5 text-muted-foreground text-sm">
+          <span className="flex min-w-0 items-center gap-1.5 truncate text-muted-foreground text-sm">
             {draft ? (
               `draft · proposed by ${draft.parent}`
             ) : ownerRequest ? (
@@ -800,86 +952,111 @@ export function BotsPage() {
               </>
             ) : null}
           </span>
+          {/* The live body. A bot without one is between iterations, which is
+              the normal state — the link appears when there is something to
+              look at, rather than sitting there dead. */}
+          {liveSession && (
+            <Link
+              to={`/c/${liveSession}`}
+              className="ml-auto flex shrink-0 items-center gap-1.5 rounded-otto-button border border-border px-2 py-0.5 text-sm hover:bg-muted"
+            >
+              <ExternalLinkIcon className="size-3" />
+              Open session
+            </Link>
+          )}
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-          {refusal && (
-            <div className="mb-2 rounded-otto-sm border border-[var(--status-red)] bg-card px-2.5 py-2">
-              <span className="flex items-center gap-2">
-                <TriangleAlertIcon className="size-4 shrink-0 text-[var(--status-red)]" />
-                Refused. {refusal}
-              </span>
-            </div>
-          )}
+        {/* Capped at a reading measure. Left alone the channel stretched to
+            whatever the window gave it, which on a wide screen is a metre of
+            whitespace with a sentence in the corner.
+            One wrapper, not a cap on each child: `ch` scales with font-size, so
+            per-child caps gave the small-text lines a narrower box and every
+            other row a different left edge. */}
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-3">
+          <div className="mx-auto max-w-[68ch]">
+            {refusal && (
+              <div className="mb-2 rounded-otto-sm border border-[var(--status-red)] bg-card px-2.5 py-2">
+                <span className="flex items-center gap-2">
+                  <TriangleAlertIcon className="size-4 shrink-0 text-[var(--status-red)]" />
+                  Refused. {refusal}
+                </span>
+              </div>
+            )}
 
-          {draft && (
-            <DraftCard
-              draft={draft}
-              busy={adopt.isPending}
-              onDecide={(decision) =>
-                void run(
-                  () => adopt.mutateAsync({ spawn: draft.id, decision }),
-                  "The proposal was not decided.",
-                )
-              }
-            />
-          )}
-
-          {ownerRequest && (
-            <>
-              <p className="pb-2 text-muted-foreground text-sm">
-                Money verbs never resolve in a bot&rsquo;s channel. The same request appears there
-                with no buttons, and that discontinuity is the capability boundary.
-              </p>
-              <OwnerCard
-                request={ownerRequest}
-                canSign={fleet.data?.canSign ?? false}
-                busy={sign.isPending}
-                onDecide={(approved) =>
+            {draft && (
+              <DraftCard
+                draft={draft}
+                busy={adopt.isPending}
+                onDecide={(decision) =>
                   void run(
-                    () =>
-                      sign.mutateAsync({
-                        approval: ownerRequest.id,
-                        approved,
-                        confirmed: approved,
-                      }),
-                    "The signature was refused.",
+                    () => adopt.mutateAsync({ spawn: draft.id, decision }),
+                    "The proposal was not decided.",
                   )
                 }
               />
-            </>
-          )}
+            )}
 
-          {!draft && detail.data && (
-            <>
-              {detail.data.pending.length > 0 && !ownerRequest && (
-                <>
-                  <h2 className="pb-1.5 text-muted-foreground text-sm">Waiting on you</h2>
-                  {detail.data.pending.map((approval) => (
-                    <ApprovalCard
-                      key={approval.id}
-                      approval={approval}
-                      busy={answer.isPending}
-                      onAnswer={(choice, approved) => void handleAnswer(approval, choice, approved)}
-                    />
-                  ))}
-                </>
-              )}
+            {ownerRequest && (
+              <>
+                <p className="pb-2 text-muted-foreground text-sm">
+                  Money verbs never resolve in a bot&rsquo;s channel. The same request appears there
+                  with no buttons, and that discontinuity is the capability boundary.
+                </p>
+                <OwnerCard
+                  request={ownerRequest}
+                  canSign={fleet.data?.canSign ?? false}
+                  busy={sign.isPending}
+                  onDecide={(approved) =>
+                    void run(
+                      () =>
+                        sign.mutateAsync({
+                          approval: ownerRequest.id,
+                          approved,
+                          confirmed: approved,
+                        }),
+                      "The signature was refused.",
+                    )
+                  }
+                />
+              </>
+            )}
 
-              <p className="pt-2 text-muted-foreground text-sm">{detail.data.mission}</p>
+            {!draft && detail.data && (
+              <>
+                {detail.data.pending.length > 0 && !ownerRequest && (
+                  <>
+                    <h2 className="pb-1.5 text-muted-foreground text-sm">Waiting on you</h2>
+                    {detail.data.pending.map((approval) => (
+                      <ApprovalCard
+                        key={approval.id}
+                        approval={approval}
+                        busy={answer.isPending}
+                        onAnswer={(choice, approved) =>
+                          void handleAnswer(approval, choice, approved)
+                        }
+                      />
+                    ))}
+                  </>
+                )}
 
-              {detail.data.channel.length === 0 ? (
-                <p className="pt-3 text-muted-foreground text-sm">Nothing said yet.</p>
-              ) : (
-                detail.data.channel.map((message) => <ChannelLine key={message.seq} {...message} />)
-              )}
-            </>
-          )}
+                <p className="pt-2 text-muted-foreground text-sm">{detail.data.mission}</p>
+
+                {detail.data.channel.length === 0 ? (
+                  <p className="pt-3 text-muted-foreground text-sm">Nothing said yet.</p>
+                ) : (
+                  detail.data.channel.map((message) => (
+                    <ChannelLine key={message.seq} {...message} />
+                  ))
+                )}
+              </>
+            )}
+          </div>
         </div>
       </div>
 
       {/* ── dock ───────────────────────────────────────────────── */}
-      <div className="hidden min-h-0 xl:block">
+      <div className="hidden min-h-0 flex-col border-l border-border xl:flex">
+        <TopBand />
         {detail.data && !draft && <Dock bot={detail.data} tab={dockTab} setTab={setDockTab} />}
       </div>
     </div>

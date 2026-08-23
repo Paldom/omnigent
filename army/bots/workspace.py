@@ -163,6 +163,11 @@ class Workspace:
             ("lessons.md", DocKind.LESSON),
         ):
             self.index(bot, kind, name, title=name.removesuffix(".md").title(), now=now)
+        # Pin it on the bot. Until this, a bot that took the default root had an
+        # empty `workspace` column, so anything reading the row — the page, the
+        # roster, a second process with a different `--root` — could not find
+        # the directory that had just been created for it.
+        self.bots.record_workspace(bot, str(target), now=now)
         return target
 
     def _add_worktree(self, bot: Bot, source_repo: Path, target: Path) -> None:

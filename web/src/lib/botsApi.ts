@@ -74,6 +74,37 @@ export interface BotRun {
   outcome: RunOutcome | null;
   reason: string | null;
   at: number;
+  /**
+   * The Omnigent conversation this iteration ran in.
+   *
+   * A bot's body is an ordinary session, so this is the whole answer to "what
+   * is the harness actually doing" — `/c/{sessionId}` is the normal chat page,
+   * with its transcript, files, terminals, browser and subagents. `null` for
+   * an iteration that never opened one.
+   */
+  sessionId: string | null;
+}
+
+/** One entry in a bot's workspace. */
+export interface WorkspaceEntry {
+  name: string;
+  /** Relative to the workspace root — the only path shape the API accepts. */
+  path: string;
+  dir: boolean;
+  bytes: number | null;
+  modifiedAt: number;
+}
+
+/** A directory listing, or one file's text. */
+export interface WorkspaceView {
+  running: boolean;
+  root: string | null;
+  path: string;
+  entries: WorkspaceEntry[] | null;
+  text: string | null;
+  bytes: number | null;
+  /** Set when the file is not text, or is past the viewer's cap. */
+  reason: string | null;
 }
 
 /** One line in a bot's channel. */
@@ -294,7 +325,14 @@ export async function getBot(
     pausedReason: body.paused_reason ?? null,
     workspace: body.workspace ?? null,
     browserProfile: body.browser_profile ?? null,
-    runs: (body.runs ?? []) as BotRun[],
+    runs: (body.runs ?? []).map((row: any) => ({
+      id: row.id,
+      state: row.state,
+      outcome: row.outcome,
+      reason: row.reason,
+      at: row.at,
+      sessionId: row.session_id ?? null,
+    })),
     channel: (body.channel ?? []) as BotMessage[],
     pending: (body.pending ?? []).map(toApproval),
   };
@@ -352,6 +390,41 @@ export async function adoptDraft(input: {
   because?: string;
 }): Promise<Verdict> {
   return post("/v1/bots/adopt", input, "The proposal was not decided.");
+}
+
+/**
+ * Browse a bot's workspace, or read one file.
+ *
+ * The path is always relative to the workspace root, and the control plane
+ * refuses anything that escapes it — this client never resolves a path, so
+ * there is exactly one place that check lives.
+ */
+export async function getWorkspace(
+  slug: string,
+  path: string,
+  read = false,
+): Promise<WorkspaceView> {
+  const query = new URLSearchParams({ path, read: read ? "true" : "false" });
+  const response = await authenticatedFetch(`/v1/bots/${encodeURIComponent(slug)}/files?${query}`);
+  if (!response.ok) throw new Error(`workspace ${slug}: ${response.status}`);
+  const body: any = await response.json();
+  return {
+    running: Boolean(body.running),
+    root: body.root ?? null,
+    path,
+    entries: body.entries
+      ? body.entries.map((row: any) => ({
+          name: row.name,
+          path: row.path,
+          dir: Boolean(row.dir),
+          bytes: row.bytes ?? null,
+          modifiedAt: row.modified_at,
+        }))
+      : null,
+    text: typeof body.text === "string" ? body.text : null,
+    bytes: body.bytes ?? null,
+    reason: body.error ?? body.reason ?? (body.binary ? "not a text file" : null),
+  };
 }
 
 /** What every write returns: it worked, or it says why not. */

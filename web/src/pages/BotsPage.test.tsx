@@ -8,6 +8,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BotsPage } from "./BotsPage";
@@ -17,6 +18,7 @@ const getBot = vi.fn();
 const answerApproval = vi.fn();
 const signOwnerRequest = vi.fn();
 const adoptDraft = vi.fn();
+const getWorkspace = vi.fn();
 
 vi.mock("@/lib/botsApi", () => ({
   listBots: (...args: unknown[]) => listBots(...args),
@@ -24,6 +26,7 @@ vi.mock("@/lib/botsApi", () => ({
   answerApproval: (...args: unknown[]) => answerApproval(...args),
   signOwnerRequest: (...args: unknown[]) => signOwnerRequest(...args),
   adoptDraft: (...args: unknown[]) => adoptDraft(...args),
+  getWorkspace: (...args: unknown[]) => getWorkspace(...args),
 }));
 
 function bot(slug: string, overrides: Record<string, unknown> = {}) {
@@ -139,9 +142,11 @@ function fleet(overrides: Record<string, unknown> = {}) {
 function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
-    <QueryClientProvider client={client}>
-      <BotsPage />
-    </QueryClientProvider>,
+    <MemoryRouter>
+      <QueryClientProvider client={client}>
+        <BotsPage />
+      </QueryClientProvider>
+    </MemoryRouter>,
   );
   return client;
 }
@@ -161,6 +166,18 @@ beforeEach(() => {
   answerApproval.mockResolvedValue({ ok: true });
   signOwnerRequest.mockResolvedValue({ ok: true });
   adoptDraft.mockResolvedValue({ ok: true });
+  getWorkspace.mockResolvedValue({
+    running: true,
+    root: "/tmp/bots/scout",
+    path: "",
+    entries: [
+      { name: "charter.md", path: "charter.md", dir: false, bytes: 220, modifiedAt: 0 },
+      { name: "reports", path: "reports", dir: true, bytes: null, modifiedAt: 0 },
+    ],
+    text: null,
+    bytes: null,
+    reason: null,
+  });
 });
 
 describe("BotsPage", () => {
@@ -364,6 +381,55 @@ describe("BotsPage", () => {
 
     expect(await screen.findByText("Merge the candidate patch?")).toBeInTheDocument();
     expect(screen.queryByText("Needs your signature")).not.toBeInTheDocument();
+  });
+
+  it("browses the real workspace instead of naming files it assumes are there", async () => {
+    renderPage();
+    // The listing comes from the control plane, which reads the directory. An
+    // earlier cut hardcoded charter/runbook/lessons, which looked like a file
+    // browser and was a picture of one — it would have shown those three names
+    // for a bot whose workspace was empty, or missing.
+    expect(await screen.findByText("charter.md")).toBeInTheDocument();
+    expect(screen.getByText("reports")).toBeInTheDocument();
+    expect(getWorkspace).toHaveBeenCalledWith("scout", "", false);
+  });
+
+  it("opens a file from the workspace and previews markdown", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByText("charter.md"));
+    await waitFor(() => expect(getWorkspace).toHaveBeenCalledWith("scout", "charter.md", true));
+  });
+
+  it("links an iteration to the session it actually ran in", async () => {
+    // "I can't check the running harness behind" — a bot's body is an ordinary
+    // conversation, so the ledger links to the real chat page rather than
+    // paraphrasing what happened there.
+    getBot.mockResolvedValue(
+      detail({
+        pending: [],
+        runs: [
+          {
+            id: "f".repeat(32),
+            state: "continue",
+            outcome: "work_done",
+            reason: null,
+            at: Math.floor(Date.now() / 1000),
+            sessionId: "conv_abc123",
+          },
+        ],
+      }),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
+    const link = await screen.findByRole("link", { name: /open session/ });
+    expect(link).toHaveAttribute("href", "/c/conv_abc123");
+  });
+
+  it("offers the live body from the titlebar, and hides it when there is none", async () => {
+    getBot.mockResolvedValue(detail({ pending: [], runs: [] }));
+    renderPage();
+    await screen.findByText("Watch the eval set");
+    expect(screen.queryByRole("link", { name: "Open session" })).not.toBeInTheDocument();
   });
 
   it("says why the system paused a bot, where the roster shows it", async () => {

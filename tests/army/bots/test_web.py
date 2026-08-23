@@ -9,6 +9,7 @@ it may execute.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -23,9 +24,10 @@ from army.bots.messages import MessageKind, MessageStore
 from army.bots.model import BotStatus, WakeKind, WakePolicy
 from army.bots.spawn import SpawnStore
 from army.bots.store import BotStore
-from army.bots.web import BotsSite
+from army.bots.web import MAX_READ_BYTES, BotsSite
+from army.bots.workspace import Workspace
 from army.gates import Broker
-from army.state import CommandKind, Run
+from army.state import CommandKind, Run, RunState
 from army.store import Store
 from tests.army.bots.conftest import activate, make_bot
 
@@ -754,3 +756,118 @@ def test_a_post_with_no_decision_decides_nothing(spawning_site: BotsSite, bots: 
     )
     assert "activate, draft or refuse" in problem
     assert bots.by_slug("prospector") is None
+
+
+# ── the workspace panel ───────────────────────────────────────────
+#
+# The dock's Files tab used to be a hardcoded list of three filenames. It
+# looked like a file browser and was a drawing of one — it would have shown
+# charter/runbook/lessons for a bot whose directory was empty, or absent.
+
+
+@pytest.fixture()
+def workspace_site(store: Store, bots: BotStore, tmp_path: Path) -> BotsSite:
+    """A site whose bots keep their workspaces under a throwaway root."""
+    return BotsSite(
+        store,
+        bots,
+        ApprovalStore(bots),
+        MessageStore(bots),
+        TOKEN,
+        workspace=Workspace(bots, root=tmp_path / "bots"),
+    )
+
+
+def test_a_bot_with_no_directory_yet_says_so(workspace_site: BotsSite, bots: BotStore) -> None:
+    """A bot gets its workspace on its first run, which is a state, not an error."""
+    activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    payload = json.loads(workspace_site.files_json("scout", path="", read=False))
+    assert "no workspace on disk yet" in payload["reason"]
+
+
+def test_the_listing_is_the_directory(workspace_site: BotsSite, bots: BotStore) -> None:
+    bot = activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    workspace_site.workspace.prepare(bot, now=NOW)
+
+    payload = json.loads(workspace_site.files_json("scout", path="", read=False))
+    names = {entry["name"] for entry in payload["entries"]}
+    assert {"charter.md", "runbook.md", "lessons.md", "reports"} <= names
+    # Directories sort first, so the folders a person drills into are together.
+    assert payload["entries"][0]["dir"] is True
+
+
+def test_preparing_a_workspace_writes_down_where_it_is(
+    workspace_site: BotsSite, bots: BotStore, tmp_path: Path
+) -> None:
+    """
+    Otherwise "where is this bot's workspace" has two answers — an empty column
+    and whichever ``--root`` the process that made it happened to carry — and a
+    second process browses the wrong directory without anyone noticing.
+    """
+    bot = activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    assert bot.workspace is None
+    workspace_site.workspace.prepare(bot, now=NOW)
+
+    reread = bots.by_slug("scout")
+    assert reread is not None
+    assert reread.workspace == str(tmp_path / "bots" / "scout")
+
+
+def test_a_file_comes_back_as_text(workspace_site: BotsSite, bots: BotStore) -> None:
+    bot = activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    workspace_site.workspace.prepare(bot, now=NOW)
+
+    payload = json.loads(workspace_site.files_json("scout", path="charter.md", read=True))
+    assert payload["text"].startswith("#")
+    assert payload["bytes"] > 0
+
+
+def test_a_path_that_escapes_the_workspace_is_refused(
+    workspace_site: BotsSite, bots: BotStore, tmp_path: Path
+) -> None:
+    """
+    Refused, not clamped.
+
+    A bot's workspace is the one directory this endpoint may read, and the
+    caller is a browser holding a token. Serving the parent directory instead
+    of saying no would turn a bug into a file-disclosure endpoint.
+    """
+    bot = activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    workspace_site.workspace.prepare(bot, now=NOW)
+    (tmp_path / "secret.txt").write_text("not yours")
+
+    for attempt in ("../secret.txt", "../../etc/passwd", "reports/../../secret.txt"):
+        payload = json.loads(workspace_site.files_json("scout", path=attempt, read=True))
+        assert payload.get("error") == "that path is outside the workspace", attempt
+        assert "not yours" not in json.dumps(payload)
+
+
+def test_a_file_past_the_cap_is_described_rather_than_sent(
+    workspace_site: BotsSite, bots: BotStore
+) -> None:
+    """A log streamed through a JSON field into React state is a dead tab."""
+    bot = activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    root = workspace_site.workspace.prepare(bot, now=NOW)
+    (root / "huge.log").write_text("x" * (MAX_READ_BYTES + 1))
+
+    payload = json.loads(workspace_site.files_json("scout", path="huge.log", read=True))
+    assert payload["too_big"] is True
+    assert "text" not in payload
+
+
+def test_a_run_carries_the_session_it_ran_in(site: BotsSite, bots: BotStore) -> None:
+    """
+    "I can't check the running harness behind."
+
+    A bot's body is an ordinary Omnigent conversation, so the ledger carries
+    its id and the page links to the real chat page instead of paraphrasing
+    what happened there.
+    """
+    bot = activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    run = site.store.create_run(Run.new("w", {}, now=NOW, bot_id=bot.id))
+    site.store.transition(
+        run, RunState.DISPATCHING, now=NOW, artifacts={"sessions": ["conv_abc123"]}
+    )
+
+    payload = json.loads(site.bot_json("scout", now=NOW) or "{}")
+    assert payload["runs"][0]["session_id"] == "conv_abc123"

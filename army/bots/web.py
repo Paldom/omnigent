@@ -34,6 +34,7 @@ from army.bots.roster import RosterEntry, roster, summarise
 from army.bots.schedule import first_wake
 from army.bots.spawn import SpawnRefused
 from army.bots.store import BotStore
+from army.bots.workspace import Workspace
 from army.gates import GateRefused, digest
 from army.store import ConcurrentTransition, Store
 
@@ -49,6 +50,11 @@ TOKEN_FILE = Path.home() / ".omnigent" / "army" / "web-token"
 #: caller send ``00%`` and have a prefix search decide which approval they
 #: meant, which is a way to answer questions you were never shown.
 _ID = re.compile(r"^[0-9a-f]{32}$")
+
+#: How much of a file the viewer will fetch. A bot's charter is a page; a
+#: report is a few. Anything larger is a log, and streaming a log through a
+#: JSON field into a React state is how a browser tab dies.
+MAX_READ_BYTES = 512_000
 
 
 def read_or_mint_token(path: Path = TOKEN_FILE) -> str:
@@ -160,6 +166,10 @@ class BotsSite:
         property that matters here.
     :param spawns: Proposals from bots, or ``None`` to hide that page.
     :param budgets: The ledger, so the roster can say what is left.
+    :param workspace: Resolves where a bot's directory is. Needed because
+        ``bots.workspace`` is only set when a definition named one — a bot that
+        took the default root has the column empty, and reading the column
+        directly would report "no workspace" for a bot that plainly has one.
     """
 
     def __init__(
@@ -171,6 +181,7 @@ class BotsSite:
         token: str,
         spawns: Any = None,
         budgets: Any = None,
+        workspace: Workspace | None = None,
     ) -> None:
         self.store = store
         self.bots = bots
@@ -179,6 +190,7 @@ class BotsSite:
         self.token = token
         self.spawns = spawns
         self.budgets = budgets
+        self.workspace = workspace if workspace is not None else Workspace(bots)
 
     def authorises(self, supplied: str) -> bool:
         """
@@ -650,6 +662,88 @@ class BotsSite:
             return "", str(exc)
         return f"{bot.slug} is active, with {request.allowance} iterations.", ""
 
+    def files_json(self, slug: str, *, path: str, read: bool) -> str | None:
+        """
+        List a directory in a bot's workspace, or read one file out of it.
+
+        The workspace is real — ``charter.md``, ``runbook.md``, ``lessons.md``
+        and ``reports/`` are files on disk that a person edits to steer the bot
+        — so the page browses it rather than drawing a picture of it. The first
+        cut of the dock listed those three names as a hardcoded array, which
+        looked like a file browser and was a drawing of one.
+
+        :param slug: Which bot.
+        :param path: A path *relative to the workspace root*. Anything that
+            escapes the root is refused rather than clamped — a traversal is a
+            bug or an attack, and silently serving the wrong directory hides
+            both.
+        :param read: Return the file's text instead of a listing.
+        :returns: A JSON document, or ``None`` when there is no such bot.
+        """
+        bot = self.bots.by_slug(slug)
+        if bot is None:
+            return None
+        root = self.workspace.path_for(bot)
+        if not root.exists():
+            return json.dumps(
+                {
+                    "root": str(root),
+                    "reason": ("no workspace on disk yet; a bot gets one on its first run"),
+                }
+            )
+        try:
+            target = (root / path).resolve()
+            root_real = root.resolve()
+            # `relative_to` raises unless target is genuinely inside the root,
+            # which is the check — string prefixes match `/ws/../ws-evil`.
+            target.relative_to(root_real)
+        except (ValueError, OSError):
+            return json.dumps({"root": str(root), "error": "that path is outside the workspace"})
+
+        if not target.exists():
+            return json.dumps({"root": str(root), "error": "no such file"})
+
+        if read:
+            if target.is_dir():
+                return json.dumps({"root": str(root), "error": "that is a directory"})
+            size = target.stat().st_size
+            if size > MAX_READ_BYTES:
+                return json.dumps(
+                    {
+                        "root": str(root),
+                        "path": path,
+                        "too_big": True,
+                        "bytes": size,
+                        "error": f"{size} bytes; the viewer stops at {MAX_READ_BYTES}",
+                    }
+                )
+            try:
+                text = target.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                return json.dumps({"root": str(root), "path": path, "binary": True, "bytes": size})
+            return json.dumps({"root": str(root), "path": path, "bytes": size, "text": text})
+
+        entries = []
+        for child in sorted(
+            target.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())
+        ):
+            if child.name.startswith("."):
+                continue
+            try:
+                stat = child.stat()
+            except OSError:
+                continue
+            entries.append(
+                {
+                    "name": child.name,
+                    "path": str(child.relative_to(root_real)),
+                    "dir": child.is_dir(),
+                    "bytes": None if child.is_dir() else stat.st_size,
+                    "modified_at": int(stat.st_mtime),
+                }
+            )
+        return json.dumps({"root": str(root), "path": path, "entries": entries})
+
     def bot_json(self, slug: str, *, now: int) -> str | None:
         """
         One bot as JSON: definition, ledger, channel, and its open question.
@@ -692,6 +786,11 @@ class BotsSite:
                         "outcome": run["outcome"],
                         "reason": run["terminal_reason"],
                         "at": run["updated_at"],
+                        # The Omnigent conversation the iteration ran in. This
+                        # is what makes the harness reachable: a bot's body is
+                        # an ordinary session, and the app already has a very
+                        # good page for one.
+                        "session_id": run["session_id"],
                     }
                     for run in self.bots.runs_for(bot.id, limit=12)
                 ],
@@ -858,6 +957,16 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if route.path == "/api/bots":
             self._send(200, self.site.api(now=now), "application/json")
+        elif route.path.startswith("/api/files/"):
+            payload = self.site.files_json(
+                route.path.removeprefix("/api/files/"),
+                path=_first(params, "path"),
+                read=_first(params, "read") == "1",
+            )
+            if payload is None:
+                self._send(404, '{"error":"no such bot"}', "application/json")
+            else:
+                self._send(200, payload, "application/json")
         elif route.path.startswith("/api/bots/"):
             payload = self.site.bot_json(route.path.removeprefix("/api/bots/"), now=now)
             if payload is None:

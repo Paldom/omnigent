@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Request
@@ -126,6 +127,23 @@ def create_bots_router(*, auth_provider: AuthProvider | None = None) -> APIRoute
         """One bot's definition, ledger, channel and open question."""
         require_user(request, auth_provider)
         return await _forward("GET", f"/api/bots/{slug}")
+
+    @router.get("/bots/{slug}/files")
+    async def files(
+        request: Request, slug: str, path: str = "", read: bool = False
+    ) -> dict[str, Any]:
+        """
+        Browse a bot's workspace, or read one file out of it.
+
+        The bot's charter, runbook, lessons and reports are real files a person
+        edits to steer it, so the panel browses them. The control plane holds
+        the workspace root and refuses anything that escapes it — this only
+        forwards, and deliberately does not resolve paths itself, so there is
+        one place where that check lives.
+        """
+        require_user(request, auth_provider)
+        query = urlencode({"path": path, "read": "1" if read else "0"})
+        return await _forward("GET", f"/api/files/{slug}?{query}")
 
     @router.post("/bots/verdict")
     async def answer(request: Request) -> dict[str, Any]:

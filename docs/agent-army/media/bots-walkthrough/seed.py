@@ -178,7 +178,10 @@ for index in range(37):
     budgets.charge(scout.id, run_id=f"seed{index}", now=NOW - 3600 + index)
 
 # ── workspaces and a report ───────────────────────────────────────
-for bot in (scout, librarian):
+# Every bot, not just two: the dock's Files tab reads the real directory, so a
+# fleet where seven of nine have nothing on disk demonstrates the empty state
+# rather than the feature.
+for bot in (scout, librarian, treasurer, harvester, groundskeeper, cartographer, sentry, tinker):
     workspace.prepare(bot, now=NOW)
 workspace.write_report(
     scout,
@@ -275,7 +278,11 @@ bots.record_wake(stranded, Wake(None, stranded.wake_reason, 0, 0), None, now=NOW
 
 running = bots.by_slug("cartographer")
 run = store.create_run(Run.new("heartbeat", {"beat": 1}, now=NOW, bot_id=running.id))
-store.transition(run, RunState.DISPATCHING, now=NOW)
+# A session id, so the page can offer "Open session". A real workload records
+# this itself when it opens a body; the heartbeat used here never opens one, so
+# the demo would otherwise have no live harness to point at — which is the one
+# thing the roster exists to get you to.
+store.transition(run, RunState.DISPATCHING, now=NOW, artifacts={"sessions": ["conv_demo"]})
 
 # ── a verb only the owner may answer ──────────────────────────────
 # treasurer parks on `spend`, which is in ALWAYS_OWNER. Nothing in its own

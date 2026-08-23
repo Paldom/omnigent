@@ -604,6 +604,7 @@ def cmd_serve(config: Config, args: argparse.Namespace) -> int:
         token,
         spawns=SpawnStore(bots, budgets),
         budgets=budgets,
+        workspace=Workspace(bots),
     )
     server = serve(site, host=args.host, port=args.port)
     # The link carries the token so it can be opened on a phone. It is also the

@@ -14,6 +14,7 @@ exists to answer unambiguously.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from collections.abc import Iterator
@@ -417,11 +418,20 @@ class BotStore:
         with self.store.atomic() as conn:
             rows = conn.execute(
                 "SELECT id, state, outcome, revision_id, created_at, updated_at,"
-                " terminal_reason FROM runs WHERE bot_id = ?"
+                " terminal_reason, artifacts, outstanding FROM runs WHERE bot_id = ?"
                 " ORDER BY created_at DESC, id DESC LIMIT ?",
                 (bot_id, limit),
             ).fetchall()
-        return [dict(row) for row in rows]
+        # `artifacts` and `outstanding` are decoded here rather than shipped
+        # raw: the one thing a caller wants out of them is the Omnigent session
+        # the iteration ran in, which is what makes the live harness reachable
+        # from a bot at all.
+        out = []
+        for row in rows:
+            entry = dict(row)
+            entry["session_id"] = _session_of(entry.pop("artifacts"), entry.pop("outstanding"))
+            out.append(entry)
+        return out
 
     def stalled(
         self,
@@ -590,6 +600,37 @@ class BotStore:
             bot.next_due_at = None
         bot.version += 1
         bot.updated_at = now
+        return bot
+
+    def record_workspace(
+        self, bot: Bot, path: str, *, now: int, conn: sqlite3.Connection | None = None
+    ) -> Bot:
+        """
+        Write down where a bot's directory actually is.
+
+        Called once, when the directory is created. Before this the column was
+        only ever set by a definition that named a path, so a bot that took the
+        default root had it empty — and "where is this bot's workspace" had two
+        answers: the empty column, and whatever root the process that happened
+        to prepare it was configured with. A reader could not tell, and
+        ``army bots serve --root A`` next to ``army bots run --root B`` quietly
+        browsed the wrong directory.
+
+        Recording it also pins the answer. Changing the root later moves new
+        bots and leaves existing ones where their files already are, which is
+        the behaviour that does not lose anyone's work.
+
+        :param bot: The bot.
+        :param path: Its directory, absolute.
+        :param now: Epoch seconds.
+        :param conn: Join an open transaction, or ``None``.
+        :returns: The bot, with :attr:`Bot.workspace` set.
+        """
+        if bot.workspace == path:
+            return bot
+        with self._tx(conn) as conn:
+            self._cas(conn, bot, "workspace = ?", (path,), now=now)
+        bot.workspace = path
         return bot
 
     def _cas(
@@ -809,6 +850,42 @@ def _optional(row: sqlite3.Row, column: str) -> Any:
         return row[column]
     except (IndexError, KeyError):
         return None
+
+
+def _session_of(artifacts: str | None, outstanding: str | None) -> str | None:
+    """
+    The Omnigent session an iteration ran in, if it had one.
+
+    Same precedence as :func:`army.supervisor._asking_session`: a session the
+    workload named beats whatever the run last dispatched, so a ledger row
+    links to where the work was actually done. Kept in step with that function
+    deliberately — two answers to "which session is this run" is how a link
+    opens a different conversation from the one the question was asked in.
+
+    :param artifacts: The run's ``artifacts`` column, as stored.
+    :param outstanding: Its ``outstanding`` column, as stored.
+    :returns: A session id, or ``None``.
+    """
+    try:
+        decoded = json.loads(artifacts or "{}")
+    except (TypeError, ValueError):
+        decoded = {}
+    named = decoded.get("approval_session_id")
+    if isinstance(named, str) and named:
+        return named
+    for candidate in (decoded.get("sessions"), _loads_list(outstanding)):
+        if isinstance(candidate, list) and candidate and isinstance(candidate[0], str):
+            return candidate[0]
+    return None
+
+
+def _loads_list(raw: str | None) -> list[Any]:
+    """Decode a JSON list column, tolerating a row written by an older binary."""
+    try:
+        value = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
 
 
 def new_id() -> str:
