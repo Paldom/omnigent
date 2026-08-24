@@ -193,3 +193,23 @@ def test_the_brief_explains_refs(tmp_path: Any) -> None:
 
     assert "[ref=N]" in brief
     assert "snapshot_id" in brief
+
+
+def test_both_browsing_workloads_carry_the_same_rules(tmp_path: Any) -> None:
+    """One text, two briefs. Written twice they drift, and the drift is silent.
+
+    That is not hypothetical here: the watcher labelled its own sessions with
+    the bot's browser profile and the research workload did not, so nine of the
+    ten bots in the crypto example had no browser and nothing said so. A page
+    can lie and a page can ask for a credential whoever is reading it.
+    """
+    from army.bots.workloads.browsing import ASK_FOR_A_SIGN_IN, DATA_NOT_COMMAND
+    from army.bots.workloads.research import ResearchWorkload
+
+    watch = _workload(tmp_path)._brief(_run())
+    research = ResearchWorkload(repo=str(tmp_path))._brief("why", _run())
+
+    for brief in (watch, research):
+        assert DATA_NOT_COMMAND in brief
+        assert ASK_FOR_A_SIGN_IN in brief
+        assert "[ref=N]" in brief

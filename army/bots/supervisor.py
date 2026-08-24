@@ -160,6 +160,36 @@ class BotSupervisor(Supervisor):
         """Every in-flight bot iteration, whatever workload it belongs to."""
         return [run for run in self.store.active_runs() if run.bot_id is not None]
 
+    def _advance(self, run: Run, *, now: int) -> Run | None:
+        """
+        Advance one run, turning an unloadable workload into something readable.
+
+        Without this the base loop's catch-all logs a traceback and records
+        ``supervisor error`` — which tells an operator nothing, leaves the bot
+        active so the next tick fails the same way, and hides the actual cause
+        in a log nobody is tailing. A bot whose definition no longer matches
+        its workload is not a transient fault; it needs a person, so it pauses
+        and says exactly what it choked on.
+
+        :param run: The run to advance.
+        :param now: Epoch seconds.
+        :returns: The moved run, or ``None``.
+        """
+        try:
+            return super()._advance(run, now=now)
+        except WorkloadRefused as exc:
+            _logger.warning("run %s: %s", run.id[:12], exc)
+            # The run first, then the bot. Settling a run also records the
+            # bot's next wake in the same transaction, so a pause beforehand
+            # leaves that write holding a stale bot — the transaction rolls
+            # back, ``_fail`` swallows the ConcurrentTransition, and the run
+            # stays in flight while the bot reads as paused.
+            failed = self._fail(run, str(exc)[:200], now=now)
+            bot = self.bots.get(run.bot_id or "")
+            if bot is not None:
+                self._pause(bot, now=now, reason=str(exc))
+            return failed
+
     def _workload_for(self, run: Run) -> Workload:
         """
         The workload the run's bot names.
@@ -323,9 +353,13 @@ class BotSupervisor(Supervisor):
         """
         try:
             workload = self.workloads.for_bot(bot)
-        except WorkloadRefused:
-            _logger.exception("bot %s cannot be dispatched; pausing it", bot.slug)
-            self._pause(bot, now=now, reason="its workload could not be loaded")
+        except WorkloadRefused as exc:
+            # The message, not a summary of it. "its workload could not be
+            # loaded" is true of a typo, a renamed argument and a deleted
+            # module alike, and the operator has to go reading logs to find out
+            # which — for a bot that is now silently not running.
+            _logger.warning("bot %s cannot be dispatched; pausing it: %s", bot.slug, exc)
+            self._pause(bot, now=now, reason=str(exc))
             return None
 
         if self._has_live_run(bot):

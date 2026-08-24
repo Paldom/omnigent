@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from army.bots.workloads.browsing import browsing_rules
 from army.omni import OmniClient, OmniError
 from army.state import Run
 
@@ -366,6 +367,7 @@ class ResearchWorkload:
             f"what you tried, what the "
             f"numbers were, and whether the answer is yes or no. **A confident no with "
             f"evidence is a complete result**; do not manufacture a positive.\n\n"
+            f"{browsing_rules()}\n\n"
             f"## Paths you must not modify\n\n{denied}\n\n"
             f"These are checked against `git status` after you finish, outside this "
             f"conversation. Touching one refuses the whole iteration.\n\n"

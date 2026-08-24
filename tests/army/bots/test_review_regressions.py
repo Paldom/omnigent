@@ -16,7 +16,8 @@ import pytest
 
 from army.bots.approvals import ApprovalStore
 from army.bots.messages import MessageStore
-from army.bots.model import BotStatus, RunOutcome, WakeKind, WakePolicy, WakeReason
+from army.bots.model import Bot, BotStatus, RunOutcome, WakeKind, WakePolicy, WakeReason
+from army.bots.registry import WorkloadRefused, WorkloadRegistry
 from army.bots.schedule import (
     MAX_ERROR_STREAK,
     RETRY_MAX_S,
@@ -417,3 +418,40 @@ def test_a_refused_run_hands_the_work_item_back(store: Store, bots: BotStore) ->
     fleet._has_live_run = pretend_free  # type: ignore[method-assign]
     assert fleet._start(bot, now=NOW) is None
     assert workload.released, "the work item was not handed back"
+
+
+def test_a_bot_whose_definition_drifted_says_what_broke(store: Store, bots: BotStore) -> None:
+    """A workload that will not construct must not read as "supervisor error".
+
+    Removing a config key from a workload left every existing bot pinned to a
+    revision that still passed it. The run died in the base loop's catch-all,
+    was recorded as ``supervisor error``, and the actual cause — an unexpected
+    keyword argument — went only to a log. The bot stayed active, so the next
+    tick did it again.
+    """
+
+    class Refusing(WorkloadRegistry):
+        def for_bot(self, bot: Bot) -> object:
+            raise WorkloadRefused("cannot construct 'watch': unexpected argument 'profile'")
+
+        def resolve(self, path: str, options: dict) -> object:
+            raise WorkloadRefused("cannot construct 'watch': unexpected argument 'profile'")
+
+    messages = MessageStore(bots)
+    fleet = BotSupervisor(store, FakeOmni(), bots, Refusing(), messages=messages)
+    bot = activate(bots, make_bot("scout", workload=HEARTBEAT, wake=_continuous()), now=NOW)
+    run = store.create_run(Run.new("w", {}, now=NOW, bot_id=bot.id))
+    run = store.transition(run, RunState.DISPATCHING, now=NOW)
+
+    fleet._advance(run, now=NOW + 1)
+
+    paused = bots.get(bot.id)
+    assert paused is not None
+    assert paused.status is BotStatus.PAUSED
+    assert "unexpected argument 'profile'" in (paused.paused_reason or "")
+
+    failed = store.get_run(run.id)
+    assert failed is not None
+    assert failed.state is RunState.FAILED
+    assert failed.terminal_reason != "supervisor error"
+    assert "profile" in (failed.terminal_reason or "")
