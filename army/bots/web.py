@@ -20,6 +20,7 @@ import logging
 import re
 import secrets
 import time
+from contextlib import suppress
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -55,6 +56,11 @@ _ID = re.compile(r"^[0-9a-f]{32}$")
 #: report is a few. Anything larger is a log, and streaming a log through a
 #: JSON field into a React state is how a browser tab dies.
 MAX_READ_BYTES = 512_000
+
+#: How long a message to a bot may be. Long enough for a paragraph of
+#: correction, short enough that the channel does not become the place someone
+#: pastes a log — the workspace is for that.
+MAX_MESSAGE_CHARS = 4_000
 
 
 def read_or_mint_token(path: Path = TOKEN_FILE) -> str:
@@ -602,6 +608,72 @@ class BotsSite:
         )
         return f"Recorded {command.kind.value}; the loop applies it on its next tick.", ""
 
+    def say(self, form: dict[str, list[str]], *, now: int) -> tuple[str, str]:
+        """
+        Say something to a bot.
+
+        HITL was approve-or-deny and nothing else, which makes a bot a vending
+        machine: you may accept what it offers or refuse it, and you may not
+        ask it a question, correct a wrong assumption, or change its mind
+        halfway. A channel that only a bot may write to is not a channel.
+
+        This records the message and pulls the bot's wake forward. It does
+        **not** reach into a running session from here — the same reason a
+        verdict does not: this process holds no vendor client, and the loop is
+        the only thing that should touch a body. The message is owed to the
+        bot, so the next tick either forwards it into the live session or puts
+        it in the brief for the next iteration. Either way it survives a
+        restart, which a direct call would not.
+
+        A message is not an answer. An open approval stays open — saying "why
+        did you rule that out?" must never read as approval, and a channel
+        where discussion silently authorises is worse than one with no
+        discussion at all.
+
+        :param form: ``bot`` and ``text``.
+        :param now: Epoch seconds.
+        :returns: ``(notice, problem)``, one of which is empty.
+        """
+        bot = self.bots.by_slug(_first(form, "bot"))
+        if bot is None:
+            return "", "no bot by that name"
+        text = _first(form, "text").strip()
+        if not text:
+            return "", "nothing to say"
+        if len(text) > MAX_MESSAGE_CHARS:
+            return "", f"{len(text)} characters; the channel takes {MAX_MESSAGE_CHARS}"
+
+        self.messages.post(
+            bot.id,
+            # Not "human" — this page authenticates a token, which proves the
+            # caller could read a file bots cannot, not who they are.
+            "human:channel",
+            MessageKind.HUMAN_MSG,
+            text,
+            now=now,
+            # `authorises: False` is load-bearing and read by the supervisor:
+            # it is what stops a chat message being mistaken for a verdict.
+            payload={"authorises": False},
+            deliver_to=[bot.address],
+        )
+
+        live = self.bots.live_run_ids().get(bot.id)
+        if live is not None:
+            return "Sent. The loop hands it to the running iteration on its next tick.", ""
+        if bot.status is not BotStatus.ACTIVE:
+            return (
+                f"Recorded. {bot.slug} is {bot.status.value}; it will read this when it runs.",
+                "",
+            )
+        with suppress(ConcurrentTransition):
+            # Imported here rather than at module scope: `supervisor` pulls in
+            # the whole loop, and this page is also served by processes that
+            # never run one.
+            from army.bots.supervisor import wake_now
+
+            wake_now(self.bots, bot, now=now, reason="human")
+        return "Sent. It wakes now and reads this first.", ""
+
     def adopt(self, form: dict[str, list[str]], *, now: int) -> tuple[str, str]:
         """
         Decide a bot another bot asked for.
@@ -1076,6 +1148,7 @@ class _Handler(BaseHTTPRequestHandler):
             "/verdict": self.site.verdict,
             "/owner/sign": self.site.sign,
             "/spawn/adopt": self.site.adopt,
+            "/say": self.site.say,
         }
         action = actions.get(route.path)
         if action is None:

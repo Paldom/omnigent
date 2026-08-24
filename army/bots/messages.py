@@ -468,6 +468,42 @@ class MessageStore:
             ).fetchall()
         return {row["recipient"]: int(row["pending"]) for row in rows}
 
+    def waiting_from_humans(self, *, now: int) -> dict[str, int]:
+        """
+        The same scan, restricted to mail a person wrote.
+
+        The wake model deliberately refuses to pull a *scheduled* bot forward
+        when mail arrives: two bots that talk to each other would spin without
+        anybody involved. A person is the exception to that argument rather
+        than a hole in it — nobody types fast enough to spin a loop, and a bot
+        that ignores you for fourteen minutes because its interval says so is
+        not a colleague.
+
+        Joined to ``messages`` so the exception cannot be claimed by a bot
+        addressing itself as a human: the author is what decides, and only the
+        channel writes that.
+
+        :param now: Epoch seconds.
+        :returns: ``{recipient: count}`` for human-authored mail only.
+        """
+        with self.store.atomic() as conn:
+            rows = conn.execute(
+                "SELECT d.recipient AS recipient, COUNT(*) AS pending"
+                " FROM message_deliveries d JOIN messages m ON m.id = d.message_id"
+                " WHERE d.available_at <= ?"
+                " AND (d.state = ? OR (d.state = ? AND d.lease_until <= ?))"
+                " AND m.kind = ?"
+                " GROUP BY d.recipient",
+                (
+                    now,
+                    DeliveryState.QUEUED.value,
+                    DeliveryState.LEASED.value,
+                    now,
+                    MessageKind.HUMAN_MSG.value,
+                ),
+            ).fetchall()
+        return {row["recipient"]: int(row["pending"]) for row in rows}
+
     def dead_letters(self) -> list[tuple[str, str, str]]:
         """
         Deliveries that were given up on, so they are visible rather than lost.

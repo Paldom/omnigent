@@ -7718,6 +7718,30 @@
         ]
       }
     },
+    "/v1/bots/say": {
+      "post": {
+        "description": "Say something to a bot.\n\nA separate route from the verdict on purpose, and the separation is the\nfeature: HITL that is only approve-or-deny makes a bot a vending\nmachine. This carries a sentence, and it carries no authority \u2014 an open\napproval is still open after it, because a channel where discussion\nquietly authorises is worse than one with no discussion at all.",
+        "operationId": "say_v1_bots_say_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Say V1 Bots Say Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Say",
+        "tags": [
+          "bots"
+        ]
+      }
+    },
     "/v1/bots/verdict": {
       "post": {
         "description": "Answer a question, through the control plane's own bound path.\n\nDeliberately a forward rather than a reimplementation. The bindings \u2014\naction hash, policy version, run version \u2014 are checked once, in the\nplace that owns them, so this page cannot become a softer route to a\nverdict than the CLI.",

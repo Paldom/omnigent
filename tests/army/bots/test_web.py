@@ -22,6 +22,7 @@ from army.bots.approvals import (
 from army.bots.budget import BudgetStore
 from army.bots.messages import MessageKind, MessageStore
 from army.bots.model import BotStatus, WakeKind, WakePolicy
+from army.bots.schedule import Wake
 from army.bots.spawn import SpawnStore
 from army.bots.store import BotStore
 from army.bots.web import MAX_READ_BYTES, BotsSite
@@ -921,3 +922,68 @@ def test_a_bot_is_not_its_own_sibling(spawning_site: BotsSite, bots: BotStore) -
     )
     child = json.loads(spawning_site.bot_json("prospector", now=NOW) or "{}")["lineage"]
     assert child["siblings"] == []
+
+
+# ── saying something ──────────────────────────────────────────────
+#
+# HITL was approve-or-deny, which makes a bot a vending machine: you may accept
+# what it offers or refuse it, and you may not ask it a question, correct a
+# wrong assumption, or change its mind halfway.
+
+
+def test_saying_something_records_it_and_owes_it_to_the_bot(
+    site: BotsSite, bots: BotStore
+) -> None:
+    bot = activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    notice, problem = site.say({"bot": ["scout"], "text": ["check the fee per side"]}, now=NOW)
+
+    assert problem == "" and notice
+    said = [m for m in site.messages.channel(bot.id) if m.kind is MessageKind.HUMAN_MSG]
+    assert [m.body for m in said] == ["check the fee per side"]
+    # Owed, not merely logged: the loop leases it and hands it to a body.
+    assert site.messages.waiting_recipients(now=NOW).get(bot.address) == 1
+
+
+def test_a_message_is_never_an_approval(site: BotsSite, bots: BotStore) -> None:
+    """
+    The whole reason this is a separate path.
+
+    A channel where discussion quietly authorises is worse than one with no
+    discussion at all, so the payload says so and the open request is untouched.
+    """
+    bot = activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    request = _ask(site, bot.id)
+    site.say({"bot": ["scout"], "text": ["why did you rule that out?"]}, now=NOW)
+
+    reread = site.approvals.get(request.id)  # type: ignore[attr-defined]
+    assert reread is not None and reread.state is ApprovalState.PENDING
+    said = next(m for m in site.messages.channel(bot.id) if m.kind is MessageKind.HUMAN_MSG)
+    assert said.payload["authorises"] is False
+
+
+def test_saying_something_to_an_idle_bot_wakes_it(site: BotsSite, bots: BotStore) -> None:
+    """Being ignored for fourteen minutes is the difference between a colleague
+    and a cron job."""
+    bot = activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    bots.record_wake(bot, Wake(NOW + 3600, bot.wake_reason, 0, 0), None, now=NOW)
+    assert bots.by_slug("scout").next_due_at == NOW + 3600  # type: ignore[union-attr]
+
+    site.say({"bot": ["scout"], "text": ["stop what you are doing"]}, now=NOW)
+    assert bots.by_slug("scout").next_due_at == NOW  # type: ignore[union-attr]
+
+
+def test_an_empty_message_is_refused(site: BotsSite, bots: BotStore) -> None:
+    activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    _notice, problem = site.say({"bot": ["scout"], "text": ["   "]}, now=NOW)
+    assert "nothing to say" in problem
+
+
+def test_a_message_past_the_cap_is_refused(site: BotsSite, bots: BotStore) -> None:
+    """The workspace is where a log goes; the channel is for a sentence."""
+    from army.bots.web import MAX_MESSAGE_CHARS
+
+    activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    _notice, problem = site.say(
+        {"bot": ["scout"], "text": ["x" * (MAX_MESSAGE_CHARS + 1)]}, now=NOW
+    )
+    assert "the channel takes" in problem

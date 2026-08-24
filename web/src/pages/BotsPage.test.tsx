@@ -19,6 +19,7 @@ const answerApproval = vi.fn();
 const signOwnerRequest = vi.fn();
 const adoptDraft = vi.fn();
 const getWorkspace = vi.fn();
+const sayToBot = vi.fn();
 
 vi.mock("@/lib/botsApi", () => ({
   listBots: (...args: unknown[]) => listBots(...args),
@@ -27,6 +28,7 @@ vi.mock("@/lib/botsApi", () => ({
   signOwnerRequest: (...args: unknown[]) => signOwnerRequest(...args),
   adoptDraft: (...args: unknown[]) => adoptDraft(...args),
   getWorkspace: (...args: unknown[]) => getWorkspace(...args),
+  sayToBot: (...args: unknown[]) => sayToBot(...args),
 }));
 
 function bot(slug: string, overrides: Record<string, unknown> = {}) {
@@ -175,6 +177,7 @@ beforeEach(() => {
   answerApproval.mockResolvedValue({ ok: true });
   signOwnerRequest.mockResolvedValue({ ok: true });
   adoptDraft.mockResolvedValue({ ok: true });
+  sayToBot.mockResolvedValue({ ok: true });
   getWorkspace.mockResolvedValue({
     running: true,
     root: "/tmp/bots/scout",
@@ -515,6 +518,55 @@ describe("BotsPage", () => {
     );
     expect(inTitlebar.length).toBe(1);
     expect(inTitlebar[0].className).not.toContain("mt-[");
+  });
+
+  it("lets you say something to a bot, which is not answering it", async () => {
+    // HITL was approve-or-deny and nothing else, which makes a bot a vending
+    // machine: you may accept what it offers or refuse it, and you may not ask
+    // it a question or correct a wrong assumption.
+    renderPage();
+    const box = await screen.findByPlaceholderText(/Say something to scout/);
+    fireEvent.change(box, { target: { value: "the fee is per side, not round trip" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(sayToBot).toHaveBeenCalled());
+    expect(sayToBot.mock.calls[0][0]).toEqual({
+      bot: "scout",
+      text: "the fee is per side, not round trip",
+    });
+    // The open question is untouched: talking is not approving.
+    expect(answerApproval).not.toHaveBeenCalled();
+    expect(screen.getByText("Merge the candidate patch?")).toBeInTheDocument();
+  });
+
+  it("says where the message will land, because that differs", async () => {
+    getBot.mockResolvedValue(detail({ status: "running", pending: [] }));
+    renderPage();
+    expect(await screen.findByText(/reaches the running iteration/)).toBeInTheDocument();
+
+    getBot.mockResolvedValue(detail({ status: "backing_off", pending: [] }));
+    renderPage();
+    expect(await screen.findAllByText(/reads this first when it next wakes/)).not.toHaveLength(0);
+  });
+
+  it("Enter sends and Shift+Enter does not", async () => {
+    // A paragraph of correction is common here, and losing one to a stray
+    // Enter is the thing people would remember.
+    renderPage();
+    const box = await screen.findByPlaceholderText(/Say something to scout/);
+    fireEvent.change(box, { target: { value: "line one" } });
+    fireEvent.keyDown(box, { key: "Enter", shiftKey: true });
+    expect(sayToBot).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(sayToBot).toHaveBeenCalled());
+  });
+
+  it("offers no composer for a draft, which has no channel yet", async () => {
+    listBots.mockResolvedValue(fleet({ drafts: [botDraft()] }));
+    renderPage();
+    await screen.findByText(/Nobody is indexing/);
+    expect(screen.queryByPlaceholderText(/Say something/)).not.toBeInTheDocument();
   });
 
   it("says why the system paused a bot, where the roster shows it", async () => {

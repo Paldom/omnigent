@@ -15,6 +15,7 @@ import {
   getBot,
   getWorkspace,
   listBots,
+  sayToBot,
   signOwnerRequest,
   type BotDetail,
   type BotFleet,
@@ -124,6 +125,23 @@ export function useSignOwnerRequest(slug: string | null) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: signOwnerRequest,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: BOTS_KEY });
+      if (slug) void queryClient.invalidateQueries({ queryKey: botKey(slug) });
+    },
+  });
+}
+
+/**
+ * Say something to a bot.
+ *
+ * Invalidates both: the message lands in the bot's channel, and saying
+ * something to an idle bot pulls its wake forward, which changes the roster.
+ */
+export function useSayToBot(slug: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: sayToBot,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: BOTS_KEY });
       if (slug) void queryClient.invalidateQueries({ queryKey: botKey(slug) });

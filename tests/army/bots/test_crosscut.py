@@ -526,3 +526,118 @@ def test_two_bots_differing_only_in_precondition_share_a_workload() -> None:
         {"outcome": "no_work", "precondition": {"path": "/tmp/b.md"}},
     )
     assert first is second
+
+
+def test_a_message_reaches_the_body_that_is_already_working(bots: BotStore, store: Store) -> None:
+    """
+    The half that makes the channel a conversation rather than a log.
+
+    Before this, a message to a busy bot sat in its inbox until the iteration
+    finished — the one moment it is useless. The point of saying "no, not that
+    branch" is to say it *while* the wrong branch is being cut.
+    """
+    from army.bots.messages import MessageKind, MessageStore
+    from army.bots.registry import WorkloadRegistry
+    from army.bots.supervisor import BotSupervisor
+    from army.state import Run, RunState
+
+    sent: list[tuple[str, str]] = []
+
+    class Recording(FakeOmni):
+        def send(self, session_id: str, text: str) -> None:
+            sent.append((session_id, text))
+
+    messages = MessageStore(bots)
+    fleet = BotSupervisor(store, Recording(), bots, WorkloadRegistry(), messages=messages)
+    bot = activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+
+    run = store.create_run(Run.new("w", {}, now=NOW, bot_id=bot.id))
+    store.transition(run, RunState.DISPATCHING, now=NOW, artifacts={"sessions": ["conv_live"]})
+    messages.post(
+        bot.id,
+        "human:channel",
+        MessageKind.HUMAN_MSG,
+        "stop, the fee is per side",
+        now=NOW,
+        deliver_to=[bot.address],
+    )
+
+    fleet._steer_live_runs(now=NOW)
+
+    assert len(sent) == 1
+    session, text = sent[0]
+    assert session == "conv_live"
+    assert "stop, the fee is per side" in text
+    # Labelled, so a body cannot mistake it for its own reasoning — and told
+    # plainly that being spoken to is not permission.
+    assert "operator is speaking to you" in text
+    assert "not** an approval" in text
+    # Acked, so it is not delivered twice.
+    assert messages.waiting_recipients(now=NOW).get(bot.address) is None
+
+
+def test_a_bot_to_bot_message_does_not_steer_a_live_run(bots: BotStore, store: Store) -> None:
+    """Mail is not steering. Only a person interrupts an iteration."""
+    from army.bots.messages import MessageKind, MessageStore
+    from army.bots.registry import WorkloadRegistry
+    from army.bots.supervisor import BotSupervisor
+    from army.state import Run, RunState
+
+    sent: list[str] = []
+
+    class Recording(FakeOmni):
+        def send(self, session_id: str, text: str) -> None:
+            sent.append(text)
+
+    messages = MessageStore(bots)
+    fleet = BotSupervisor(store, Recording(), bots, WorkloadRegistry(), messages=messages)
+    bot = activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+    run = store.create_run(Run.new("w", {}, now=NOW, bot_id=bot.id))
+    store.transition(run, RunState.DISPATCHING, now=NOW, artifacts={"sessions": ["conv_live"]})
+
+    messages.post(
+        bot.id,
+        "bot:other",
+        MessageKind.BOT_TO_BOT,
+        "have you indexed W34?",
+        now=NOW,
+        deliver_to=[bot.address],
+    )
+    fleet._steer_live_runs(now=NOW)
+    assert sent == []
+
+
+def test_a_message_to_a_run_with_no_session_is_not_stranded(bots: BotStore, store: Store) -> None:
+    """
+    Leasing before checking for a session hid the message from everything.
+
+    A lease is invisible to the wake scan as well as to the next brief, so a
+    bot whose live run never opened a body was neither steered nor woken until
+    the lease expired — the exact silence this feature exists to remove.
+    """
+    from army.bots.messages import MessageKind, MessageStore
+    from army.bots.registry import WorkloadRegistry
+    from army.bots.supervisor import BotSupervisor
+    from army.state import Run, RunState
+
+    messages = MessageStore(bots)
+    fleet = BotSupervisor(store, FakeOmni(), bots, WorkloadRegistry(), messages=messages)
+    bot = activate(bots, make_bot("scout", workload=HEARTBEAT), now=NOW)
+
+    # A live run that never opened a session — a workload that needed no body.
+    run = store.create_run(Run.new("w", {}, now=NOW, bot_id=bot.id))
+    store.transition(run, RunState.DISPATCHING, now=NOW)
+    messages.post(
+        bot.id,
+        "human:channel",
+        MessageKind.HUMAN_MSG,
+        "check the last row date",
+        now=NOW,
+        deliver_to=[bot.address],
+    )
+
+    fleet._steer_live_runs(now=NOW)
+
+    # Still owed, so the next iteration's brief picks it up.
+    assert messages.waiting_recipients(now=NOW).get(bot.address) == 1
+    assert fleet._take_messages(bot, now=NOW) == ["check the last row date"]

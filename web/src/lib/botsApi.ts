@@ -407,6 +407,19 @@ export async function answerApproval(input: {
 }
 
 /**
+ * Say something to a bot.
+ *
+ * Not a verdict. An open approval stays open — "why did you rule that out?"
+ * must never read as approval — and the control plane records the message
+ * rather than reaching into a running session, so it survives a restart. The
+ * loop hands it to the live body on its next tick, or puts it in the brief for
+ * the next iteration.
+ */
+export async function sayToBot(input: { bot: string; text: string }): Promise<Verdict> {
+  return post("/v1/bots/say", input, "The message was not delivered.");
+}
+
+/**
  * Sign an owner-only verb, or refuse it.
  *
  * A different endpoint from `answerApproval`, matching a different authority.

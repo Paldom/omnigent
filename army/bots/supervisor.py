@@ -343,6 +343,11 @@ class BotSupervisor(Supervisor):
             self._back_off(bot, now=now)
             return None
 
+        # Anything the operator said while this bot was idle rides into the
+        # iteration's payload, so the body reads it before the work item. A
+        # message that only reaches the channel is a message read a week later
+        # as history.
+        item = {**item, "said": self._take_messages(bot, now=now)}
         run = Run.new(
             workload.name,
             item,
@@ -884,12 +889,20 @@ class BotSupervisor(Supervisor):
         waiting = self.messages.waiting_recipients(now=now)
         if not waiting:
             return
+        humans = self.messages.waiting_from_humans(now=now)
         for bot in self.bots.list(status=BotStatus.ACTIVE):
             if bot.next_due_at is not None or not is_event_driven(bot):
                 # Already scheduled, or driven by a clock. Pulling a scheduled
                 # bot forward on every message is how two bots that talk to each
                 # other spin without a human ever being involved.
-                continue
+                #
+                # A person is the exception, and the argument above is exactly
+                # why: a human cannot spin a loop by talking, and being ignored
+                # for fourteen minutes after saying something is the difference
+                # between a colleague and a cron job. `waiting_humans` counts
+                # only messages a person wrote.
+                if bot.address not in humans:
+                    continue
             if bot.address not in waiting:
                 continue
             _logger.info(
@@ -947,12 +960,94 @@ class BotSupervisor(Supervisor):
         :returns: What the pass did.
         """
         stamp = int(time.time()) if now is None else now
+        self._steer_live_runs(now=stamp)
         self._deliver_mail(now=stamp)
         self._expire_approvals(now=stamp)
         self._retire_expired(now=stamp)
         report = self.tick(now=stamp)
         self._raise_alarms(now=stamp)
         return report
+
+    def _take_messages(self, bot: Bot, *, now: int) -> list[str]:
+        """
+        Claim what a person said to an idle bot, for the brief about to be written.
+
+        Acked here rather than after the session answers. The alternative is a
+        message redelivered into every subsequent brief until the bot happens
+        to reply to it, which reads to the body as the operator repeating
+        themselves and is worse than losing it.
+
+        :param bot: The bot about to run.
+        :param now: Epoch seconds.
+        :returns: What was said, oldest first.
+        """
+        if self.messages is None:
+            return []
+        said = []
+        for delivery in self.messages.lease(bot.address, now=now, limit=10):
+            if delivery.message.kind is not MessageKind.HUMAN_MSG:
+                continue
+            said.append(delivery.message.body)
+            self.messages.ack(delivery.message.id, bot.address)
+        return said
+
+    def _steer_live_runs(self, *, now: int) -> None:
+        """
+        Hand anything a person said to the body that is already working.
+
+        The half of the channel that made it a conversation rather than a log.
+        Before this, a message to a busy bot sat in its inbox until the
+        iteration finished, which is the one moment it is useless — the point
+        of saying "no, not that branch" is to say it *while* the wrong branch
+        is being cut.
+
+        Leased rather than read, and acked only after the send returns, so a
+        crash between the two redelivers rather than swallows. A vendor that is
+        down leaves the message queued and the next tick tries again.
+
+        Nothing here can authorise. The message goes in as text and the run
+        stays exactly where it was: a bot parked on an approval is still parked
+        after being spoken to, because an open question is answered on the
+        bound path or not at all.
+
+        :param now: Epoch seconds.
+        """
+        if self.messages is None:
+            return
+        for bot_id, run_id in self.bots.live_run_ids().items():
+            bot = self.bots.get(bot_id)
+            if bot is None:
+                continue
+            # The session is looked up *before* the lease, and that order is
+            # the whole correctness of this method. Leasing first and then
+            # finding no session strands the message: a lease hides it from
+            # the wake scan too, so the bot is neither steered nor woken until
+            # the lease expires — which is exactly the silence this feature
+            # exists to remove.
+            run = self.store.get_run(run_id)
+            session = _asking_session(run) if run is not None else None
+            if session is None:
+                continue
+            waiting = self.messages.lease(bot.address, now=now, limit=5)
+            if not waiting:
+                continue
+            for delivery in waiting:
+                if delivery.message.kind is not MessageKind.HUMAN_MSG:
+                    # A bot-to-bot message is mail, not steering. It waits for
+                    # the next iteration's brief like everything else.
+                    continue
+                try:
+                    self.omni.send(session, _steer(delivery.message.body))
+                except OmniError as exc:
+                    _logger.warning(
+                        "bot %s: could not steer run %s (%s); it stays queued",
+                        bot.slug,
+                        run_id[:12],
+                        exc,
+                    )
+                    break
+                self.messages.ack(delivery.message.id, bot.address)
+                _logger.info("bot %s: steered run %s mid-iteration", bot.slug, run_id[:12])
 
     def _raise_alarms(self, *, now: int) -> None:
         """
@@ -1080,6 +1175,29 @@ def _describe(item: dict[str, Any]) -> str:
         if isinstance(value, str) and value:
             return f"{key}={value[:80]!r}"
     return f"an item with keys {sorted(item)[:5]}"
+
+
+def _steer(body: str) -> str:
+    """
+    Wrap what a person said so a body cannot mistake it for its own reasoning.
+
+    A bare string arriving mid-turn reads like the agent's own note to self.
+    Labelling it is the difference between "the operator is redirecting me" and
+    a stray thought — and the last line is there because an agent that treats
+    being spoken to as permission is the failure this whole channel is built to
+    avoid.
+
+    :param body: What the operator typed.
+    :returns: The message to send into the session.
+    """
+    return (
+        "## The operator is speaking to you, mid-iteration\n\n"
+        f"{body}\n\n"
+        "Treat this as a correction or a question about the work in progress. "
+        "It is **not** an approval: any gate you are waiting on is still open "
+        "and is answered elsewhere. Reply in this session; your reply is "
+        "recorded in the bot's channel."
+    )
 
 
 def wake_now(

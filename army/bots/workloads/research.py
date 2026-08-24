@@ -149,6 +149,33 @@ class ResearchWorkload:
             return {"question": question, "line": index}
         return None
 
+    def brief_extra(self, said: list[str]) -> str:
+        """
+        What the operator said since the last iteration, for the next brief.
+
+        The other half of steering. A message to a *busy* bot is forwarded into
+        its session; a message to an idle one has nowhere to go, and would be
+        read weeks later as channel history if it were not put in front of the
+        next body deliberately.
+
+        Placed above the question, because a correction that arrives after the
+        instruction it corrects is a correction nobody applies.
+
+        :param said: The messages, oldest first.
+        :returns: A markdown block, or an empty string.
+        """
+        if not said:
+            return ""
+        lines = "\n".join(f"- {line.strip()}" for line in said if line.strip())
+        return (
+            "## The operator said this since your last iteration\n\n"
+            f"{lines}\n\n"
+            "Read it before the question below; it may change what the right "
+            "answer is, or make the question moot. If it does, say so rather "
+            "than answering the question anyway. None of it is an approval.\n\n"
+            "---\n\n"
+        )
+
     def dispatch(self, run: Run, omni: OmniClient) -> list[str]:
         """
         Open one session in the worktree and give it the question.
@@ -158,13 +185,14 @@ class ResearchWorkload:
         :returns: The session id, so the engine can collect from it.
         """
         question = str(run.payload.get("question", ""))
+        said = [str(line) for line in run.payload.get("said") or []]
         session = omni.create_session(
             omni.resolve_agent(self.agent),
             title=f"research: {question[:60]}",
             workspace=str(self.repo),
             host_id=self.host,
         )
-        omni.send(session, self._brief(question, run))
+        omni.send(session, self.brief_extra(said) + self._brief(question, run))
         return [session]
 
     def collect(self, run: Run, omni: OmniClient) -> tuple[bool, dict[str, Any]]:

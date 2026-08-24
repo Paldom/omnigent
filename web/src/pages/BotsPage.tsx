@@ -35,6 +35,7 @@ import {
   useAnswerApproval,
   useBot,
   useBots,
+  useSayToBot,
   useSignOwnerRequest,
   useWorkspace,
 } from "@/hooks/useBots";
@@ -501,6 +502,75 @@ function DraftCard({
   );
 }
 
+/**
+ * Say something to the selected bot.
+ *
+ * The half of HITL that was missing. Approve and deny answer the question a
+ * bot chose to ask; this is for the question it did not — a correction, a
+ * changed constraint, or "why did you rule that out?".
+ *
+ * Deliberately not near the approval buttons. A composer inside an approval
+ * card invites the reading that typing is answering, and it is not: the gate
+ * stays open until somebody presses a button that is bound to it.
+ */
+function Composer({
+  slug,
+  live,
+  busy,
+  onSend,
+}: {
+  slug: string;
+  live: boolean;
+  busy: boolean;
+  onSend: (text: string) => void;
+}) {
+  const [text, setText] = useState("");
+  // A draft belongs to the bot it was typed at. Carrying it to the next bot is
+  // how you tell the wrong one to stop.
+  useEffect(() => setText(""), [slug]);
+
+  function send() {
+    const trimmed = text.trim();
+    if (!trimmed || busy) return;
+    setText("");
+    onSend(trimmed);
+  }
+
+  return (
+    <div className="shrink-0 border-t border-border px-5 py-3">
+      <div className="mx-auto max-w-[68ch]">
+        <textarea
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          onKeyDown={(event) => {
+            // Enter sends, Shift+Enter breaks the line. A paragraph of
+            // correction is common enough here that losing it to a stray Enter
+            // would be the thing people remember.
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              send();
+            }
+          }}
+          rows={2}
+          placeholder={`Say something to ${slug}…`}
+          className="w-full resize-none rounded-otto-sm border border-border bg-card px-2.5 py-2 outline-none focus-visible:border-[var(--ring)]"
+        />
+        <div className="mt-1.5 flex items-center gap-2">
+          <span className="text-muted-foreground text-sm">
+            {live
+              ? "It is working now — this reaches the running iteration."
+              : "It reads this first when it next wakes."}{" "}
+            Not an approval.
+          </span>
+          <Button size="sm" className="ml-auto" disabled={busy || !text.trim()} onClick={send}>
+            Send
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** One line in the channel. */
 function ChannelLine({ kind, author, body, at }: BotDetail["channel"][number]) {
   const isAsk = kind === "ask";
@@ -864,6 +934,7 @@ export function BotsPage() {
   const answer = useAnswerApproval(slug);
   const sign = useSignOwnerRequest(slug);
   const adopt = useAdoptDraft();
+  const say = useSayToBot(slug);
 
   // The most recent iteration that had a body. Newest-first from the store, so
   // the first hit is the one to open — a bot between iterations still links to
@@ -1163,6 +1234,23 @@ export function BotsPage() {
             )}
           </div>
         </div>
+
+        {/* Below the stream, not inside it: a composer that scrolls away is a
+            composer nobody finds, and one inside the approval card would read
+            as answering the question. */}
+        {!draft && !ownerRequest && detail.data && (
+          <Composer
+            slug={detail.data.slug}
+            live={detail.data.status === "running"}
+            busy={say.isPending}
+            onSend={(text) =>
+              void run(
+                () => say.mutateAsync({ bot: detail.data!.slug, text }),
+                "The message was not delivered.",
+              )
+            }
+          />
+        )}
       </div>
 
       {/* ── dock ───────────────────────────────────────────────── */}

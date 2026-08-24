@@ -167,6 +167,25 @@ def create_bots_router(*, auth_provider: AuthProvider | None = None) -> APIRoute
             },
         )
 
+    @router.post("/bots/say")
+    async def say(request: Request) -> dict[str, Any]:
+        """
+        Say something to a bot.
+
+        A separate route from the verdict on purpose, and the separation is the
+        feature: HITL that is only approve-or-deny makes a bot a vending
+        machine. This carries a sentence, and it carries no authority — an open
+        approval is still open after it, because a channel where discussion
+        quietly authorises is worse than one with no discussion at all.
+        """
+        require_user(request, auth_provider)
+        body = await request.json()
+        return await _forward(
+            "POST",
+            "/say",
+            data={"bot": str(body.get("bot", "")), "text": str(body.get("text", ""))},
+        )
+
     @router.post("/bots/owner")
     async def sign(request: Request) -> dict[str, Any]:
         """
