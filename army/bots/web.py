@@ -25,7 +25,7 @@ from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from army.bots.approvals import ApprovalRefused, ApprovalStore
 from army.bots.budget import BudgetExhausted
@@ -159,6 +159,21 @@ _DISC: dict[DerivedStatus, str] = {
     DerivedStatus.WAITING_RESOURCE: "hold",
     DerivedStatus.BACKING_OFF: "hold",
 }
+
+
+def _bare_profile(profile: str) -> str:
+    """
+    A browser profile without its ``persist:`` prefix.
+
+    Both spellings name one browser: definitions write the Electron partition
+    form, and a hand-written one often writes the bare slug. Comparing them
+    literally means a held wheel silently refuses nothing — which is the same
+    shape as no wheel at all, and reads as a bot ignoring the handoff.
+
+    :param profile: Either spelling.
+    :returns: The bare name.
+    """
+    return profile.removeprefix("persist:").strip()
 
 
 class BotsSite:
@@ -613,34 +628,38 @@ class BotsSite:
         )
         return f"Recorded {command.kind.value}; the loop applies it on its next tick.", ""
 
-    def wheel_for_session(self, session_id: str, *, now: int) -> str:
+    def wheel_for_profile(self, profile: str, *, now: int) -> str:
         """
-        Whether a browser action for this session must be refused, and why.
+        Whether a browser action on this profile must be refused, and why.
 
-        Asked by the desktop relay after it wins the claim and before it
-        touches the page. Keyed by session because that is all the relay knows;
-        the wheel is keyed by bot, so this is the join.
+        Keyed by browser profile because that is the thing being contended: one
+        page, and either a person or a bot is driving it. The first version
+        joined session to bot by scanning recent runs for a matching session
+        id, which quietly stopped working the moment a run finished and dropped
+        its outstanding sessions — the wheel read as free while somebody was
+        holding it.
 
-        Fails **open** — an unknown session, a missing wheel store, or a bot
+        Fails **open** — an unknown profile, a missing wheel store, or a bot
         nobody is driving all answer "go ahead". A control-plane hiccup that
         silently froze every bot's browser would be a much worse failure than
         one missed refusal, and the refusal is a courtesy to the agent rather
         than the boundary: nothing here is what stops a bot doing something it
         must not.
 
-        :param session_id: The Omnigent conversation the action belongs to.
+        :param profile: The browser profile the action would drive.
         :param now: Epoch seconds.
         :returns: The refusal to hand back, or ``""`` to proceed.
         """
-        if self.wheels is None or not session_id:
+        if self.wheels is None or not profile:
             return ""
         held = self.wheels.all_held(now=now)
         if not held:
             return ""
+        wanted = _bare_profile(profile)
         for bot_id in held:
-            for run in self.bots.runs_for(bot_id, limit=4):
-                if run.get("session_id") == session_id:
-                    return REFUSAL
+            bot = self.bots.get(bot_id)
+            if bot is not None and _bare_profile(bot.browser_profile or "") == wanted:
+                return REFUSAL
         return ""
 
     def wheel(self, form: dict[str, list[str]], *, now: int) -> tuple[str, str]:
@@ -1170,7 +1189,9 @@ class _Handler(BaseHTTPRequestHandler):
         if route.path == "/api/bots":
             self._send(200, self.site.api(now=now), "application/json")
         elif route.path.startswith("/api/wheel/"):
-            refusal = self.site.wheel_for_session(route.path.removeprefix("/api/wheel/"), now=now)
+            # The browser profile, URL-quoted: it contains a colon.
+            profile = unquote(route.path.removeprefix("/api/wheel/"))
+            refusal = self.site.wheel_for_profile(profile, now=now)
             self._send(200, json.dumps({"refuse": refusal}), "application/json")
         elif route.path.startswith("/api/files/"):
             payload = self.site.files_json(

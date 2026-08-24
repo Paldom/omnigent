@@ -368,6 +368,28 @@ class OmniClient:
             return []
         return said[last_question + 1 :]
 
+    def agent_said(self, session_id: str) -> list[str]:
+        """
+        What the *agent* said in a session, oldest first.
+
+        The counterpart to :meth:`replies_after`, and the distinction is the
+        whole point: that one reads the human's answers and deliberately
+        ignores the assistant, so a workload that used it to collect an
+        agent's work got an empty string and reported "nothing to say" about
+        an iteration that had gone perfectly.
+
+        :param session_id: Session to read.
+        :returns: Assistant message texts, oldest first, empties dropped.
+        """
+        snapshot = self._request("GET", f"/v1/sessions/{session_id}")
+        said = [
+            _text_of((item.get("data") or {}).get("content"))
+            for item in snapshot.get("items") or []
+            if item.get("type") == "message"
+            and (item.get("data") or {}).get("role") == "assistant"
+        ]
+        return [text for text in said if text]
+
     def was_told(self, session_id: str, text: str) -> bool:
         """
         Whether *text* has already been delivered into this session.

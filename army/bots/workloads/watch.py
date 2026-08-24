@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -68,9 +69,12 @@ class WatchWorkload:
     :param host: The Omnigent host the body runs on.
     :param workspace: The bot's directory; reports land in ``reports/``.
     :param charter: Prepended to the brief, absolute or workspace-relative.
-    :param profile: The browser profile this bot drives. Its own by default —
-        a shared profile means one bot's compromise is every bot's session, and
-        an audit trail that cannot say which bot did a thing.
+    :param profile: The browser profile this bot drives, conventionally
+        ``bot-<slug>`` so the viewer can find it by name. Its own, never
+        shared: one profile across bots means one bot's compromise is every
+        bot's session, and an audit trail that cannot say which bot did a
+        thing. Without it the session carries no label and its browser actions
+        fall back to a desktop renderer, which a headless fleet does not have.
     """
 
     name = "watch"
@@ -120,6 +124,11 @@ class WatchWorkload:
         :param omni: The Omnigent client.
         :returns: The session id.
         """
+        # The bot's own profile, recorded on the run by the supervisor. The
+        # constructor argument is a seam for tests and for driving this
+        # workload outside a fleet; a bot in a fleet has exactly one browser
+        # and it is not a workload's business to name it.
+        profile = str(run.artifacts.get("browser_profile") or self.profile or "")
         session = omni.create_session(
             omni.resolve_agent(self.agent),
             title=f"watch: {self.url[:60]}",
@@ -128,7 +137,7 @@ class WatchWorkload:
             # The label is the whole routing decision: with it, this session's
             # browser actions run in the server-owned gateway, which a headless
             # fleet has and a subscribed desktop renderer is not.
-            labels={"omnigent.browser.profile": self.profile or f"bot-{run.bot_id or 'unknown'}"},
+            labels=({"omnigent.browser.profile": profile} if profile else None),
         )
         omni.send(session, self._brief(run))
         return [session]
@@ -151,7 +160,13 @@ class WatchWorkload:
             return False, {}
         if snapshot.status not in ("idle", "completed", "failed"):
             return False, {}
-        reply = "\n".join(omni.replies_after(sessions[0], ""))[-_REPLY_CHARS:]
+        # The *last* thing it said, not everything it said. An agent narrates
+        # as it works — "I'll load the browser tools and check the page" — and
+        # joining the lot puts that narration on line one, where the verdict is
+        # supposed to be. One run read its own opening sentence as the verdict
+        # and filed a page whose fee had moved as nothing to report.
+        said = omni.agent_said(sessions[0])
+        reply = said[-1][-_REPLY_CHARS:] if said else ""
         return True, {"reply": reply, "session_status": snapshot.status}
 
     def evaluate(self, run: Run) -> tuple[str, list[str], dict[str, Any]]:
@@ -166,14 +181,19 @@ class WatchWorkload:
         :returns: ``(question, options, evidence)``.
         """
         reply = str(run.artifacts.get("reply") or "").strip()
-        verdict = reply.split("\n", 1)[0].strip().upper() if reply else ""
+        headline = reply.split("\n", 1)[0].strip() if reply else ""
+        # Models write "**CHANGED**", "CHANGED:", "### UNCHANGED". Matching the
+        # bare word against the raw line reads every one of those as "the agent
+        # did not say" and drops a real answer on the floor. Letters only, and
+        # ``UNCHANGED`` cannot collide because it starts "UN".
+        verdict = re.sub(r"[^A-Z]", "", headline.upper())
         changed = verdict.startswith("CHANGED")
 
         evidence = {
             "url": self.url,
             "watching for": self.question,
             "previously": str(run.payload.get("last") or "nothing recorded yet"),
-            "verdict": verdict or "the agent did not say",
+            "verdict": headline or "the agent did not say",
         }
 
         if changed:

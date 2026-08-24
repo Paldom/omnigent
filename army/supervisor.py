@@ -153,7 +153,14 @@ class Supervisor:
             else:
                 report.advanced += 1
 
-        if len(active) < self.max_concurrent_runs:
+        # A run parked on a person is *live* — it still owns its work item and
+        # must not be opened twice — but it holds no vendor seat, no session
+        # and no process. Counting it against the concurrency cap meant three
+        # unanswered questions could stop a whole fleet, which is the opposite
+        # of the doctrine the cap exists to serve: the limit is on iterations
+        # *in flight against a subscription*, not on rows.
+        working = [run for run in active if run.state is not RunState.WAITING_HUMAN]
+        if len(working) < self.max_concurrent_runs:
             if self._open_run(now=stamp) is not None:
                 report.started += 1
         return report

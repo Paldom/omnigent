@@ -217,6 +217,8 @@ export interface BotFleet {
   bots: BotSummary[];
   pending: { id: string; botId: string; question: string; requiresOwner: boolean }[];
   owner: OwnerRequest[];
+  /** Who is driving each bot's browser, by slug. Absent means the bot is. */
+  driving: Record<string, { driver: string; since: number; until: number; reason: string | null }>;
   /** Whether a broker key is configured. Without one, no signature is possible. */
   canSign: boolean;
   drafts: BotDraft[];
@@ -345,6 +347,7 @@ export async function listBots(): Promise<BotFleet> {
       requiresOwner: Boolean(row.requires_owner),
     })),
     owner: (body.owner ?? []).map(toOwner),
+    driving: body.driving ?? {},
     canSign: Boolean(body.can_sign),
     drafts: (body.drafts ?? []).map(toDraft),
   };
@@ -404,6 +407,66 @@ export async function answerApproval(input: {
   approved: boolean;
 }): Promise<Verdict> {
   return post("/v1/bots/verdict", input, "The verdict was refused.");
+}
+
+/** What a bot's browser is showing. */
+/** One thing the bot made its browser do. Never the text it typed. */
+export interface BrowserStep {
+  action: string;
+  target: string;
+  ok: boolean;
+  url: string;
+  error: string;
+}
+
+export interface BotScreen {
+  ok: boolean;
+  /** A JPEG data URL, or `null` when the browser is not open. */
+  dataUrl: string | null;
+  url: string;
+  title: string;
+  error?: string;
+  /** Recent actions, oldest first. A frame says where; this says how. */
+  trail?: BrowserStep[];
+}
+
+/**
+ * The current view of a bot's browser.
+ *
+ * The same Chromium page its `browser_*` actions drive, so this is the browser
+ * being used rather than a picture of one nobody is looking at. It is **not**
+ * a network monitor: a vendor CLI can still fetch a URL with its own tooling
+ * and nothing here sees that.
+ */
+export async function getScreen(slug: string, fresh = true): Promise<BotScreen> {
+  const response = await authenticatedFetch(
+    `/v1/bots/${encodeURIComponent(slug)}/screen?fresh=${fresh ? "true" : "false"}`,
+  );
+  if (!response.ok) throw new Error(`screen ${slug}: ${response.status}`);
+  const body: any = await response.json();
+  return {
+    ok: Boolean(body.ok),
+    dataUrl: body.dataUrl ?? null,
+    url: body.url ?? "",
+    title: body.title ?? "",
+    error: body.error,
+    trail: Array.isArray(body.trail) ? body.trail : [],
+  };
+}
+
+/**
+ * Take a bot's browser, or hand it back.
+ *
+ * While it is held the bot's browser actions are refused rather than queued —
+ * a queued click lands after you have navigated away, on a page that is no
+ * longer the one it was reasoned about.
+ */
+export async function setWheel(input: {
+  bot: string;
+  take: boolean;
+  why?: string;
+}): Promise<Verdict> {
+  return post("/v1/bots/wheel", input, "The wheel did not change hands.");
 }
 
 /**

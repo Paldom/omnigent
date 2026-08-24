@@ -20,6 +20,8 @@ const signOwnerRequest = vi.fn();
 const adoptDraft = vi.fn();
 const getWorkspace = vi.fn();
 const sayToBot = vi.fn();
+const getScreen = vi.fn();
+const setWheel = vi.fn();
 
 vi.mock("@/lib/botsApi", () => ({
   listBots: (...args: unknown[]) => listBots(...args),
@@ -29,6 +31,8 @@ vi.mock("@/lib/botsApi", () => ({
   adoptDraft: (...args: unknown[]) => adoptDraft(...args),
   getWorkspace: (...args: unknown[]) => getWorkspace(...args),
   sayToBot: (...args: unknown[]) => sayToBot(...args),
+  getScreen: (...args: unknown[]) => getScreen(...args),
+  setWheel: (...args: unknown[]) => setWheel(...args),
 }));
 
 function bot(slug: string, overrides: Record<string, unknown> = {}) {
@@ -146,6 +150,7 @@ function fleet(overrides: Record<string, unknown> = {}) {
     owner: [],
     canSign: true,
     drafts: [],
+    driving: {},
     ...overrides,
   };
 }
@@ -178,6 +183,13 @@ beforeEach(() => {
   signOwnerRequest.mockResolvedValue({ ok: true });
   adoptDraft.mockResolvedValue({ ok: true });
   sayToBot.mockResolvedValue({ ok: true });
+  setWheel.mockResolvedValue({ ok: true });
+  getScreen.mockResolvedValue({
+    ok: true,
+    dataUrl: "data:image/jpeg;base64,AAAA",
+    url: "https://www.kraken.com/features/fee-schedule",
+    title: "Fee schedule",
+  });
   getWorkspace.mockResolvedValue({
     running: true,
     root: "/tmp/bots/scout",
@@ -567,6 +579,129 @@ describe("BotsPage", () => {
     renderPage();
     await screen.findByText(/Nobody is indexing/);
     expect(screen.queryByPlaceholderText(/Say something/)).not.toBeInTheDocument();
+  });
+
+  it("shows the browser the bot is actually driving", async () => {
+    getBot.mockResolvedValue(detail({ pending: [] }));
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Screen" }));
+
+    const shot = await screen.findByRole("img", { name: /scout's browser/ });
+    expect(shot).toHaveAttribute("src", "data:image/jpeg;base64,AAAA");
+    expect(screen.getByText(/kraken.com\/features\/fee-schedule/)).toBeInTheDocument();
+  });
+
+  it("says plainly that the screen is not a network monitor", async () => {
+    // A vendor CLI can fetch a URL with its own tooling and nothing here sees
+    // it. Implying otherwise would be the convincing fake worth avoiding.
+    getBot.mockResolvedValue(detail({ pending: [] }));
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Screen" }));
+    expect(await screen.findByText(/not a network monitor/)).toBeInTheDocument();
+  });
+
+  it("takes the wheel, and says the bot is refused rather than queued", async () => {
+    getBot.mockResolvedValue(detail({ pending: [] }));
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Screen" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Take the wheel" }));
+
+    await waitFor(() => expect(setWheel).toHaveBeenCalled());
+    expect(setWheel.mock.calls[0][0]).toEqual({ bot: "scout", take: true });
+  });
+
+  it("offers to hand back a wheel somebody already holds", async () => {
+    listBots.mockResolvedValue(
+      fleet({
+        bots: [bot("scout", { status: "running", needsHuman: false })],
+        driving: {
+          scout: { driver: "human:channel", since: 0, until: 9e9, reason: null },
+        },
+      }),
+    );
+    getBot.mockResolvedValue(detail({ pending: [] }));
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Screen" }));
+
+    expect(await screen.findByRole("button", { name: "Hand back" })).toBeInTheDocument();
+    expect(screen.getByText(/refused — not queued/)).toBeInTheDocument();
+  });
+
+  it("shows what the bot made its browser do, newest first", async () => {
+    // A frame says where the browser is. Watching a bot work means seeing the
+    // steps — and a wrong action is only explicable if the attempt was written
+    // down at all.
+    getScreen.mockResolvedValue({
+      ok: true,
+      dataUrl: "data:image/jpeg;base64,AAAA",
+      url: "https://www.kraken.com/features/fee-schedule",
+      title: "Fee schedule",
+      trail: [
+        {
+          action: "navigate",
+          target: "https://www.kraken.com/features/fee-schedule",
+          ok: true,
+          url: "",
+          error: "",
+        },
+        { action: "click", target: "ref 35", ok: true, url: "", error: "" },
+      ],
+    });
+    getBot.mockResolvedValue(detail({ pending: [] }));
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Screen" }));
+
+    const steps = await screen.findAllByRole("listitem");
+    expect(steps[0]).toHaveTextContent("click");
+    expect(steps[1]).toHaveTextContent("navigate");
+  });
+
+  it("shows a failed browser action rather than dropping it", async () => {
+    getScreen.mockResolvedValue({
+      ok: true,
+      dataUrl: "data:image/jpeg;base64,AAAA",
+      url: "https://example.com",
+      title: "Example",
+      trail: [
+        {
+          action: "click",
+          target: "ref 3",
+          ok: false,
+          url: "",
+          error: "click failed: no such element",
+        },
+      ],
+    });
+    getBot.mockResolvedValue(detail({ pending: [] }));
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Screen" }));
+
+    expect(await screen.findByText(/no such element/)).toBeInTheDocument();
+  });
+
+  it("never shows the text a bot typed into a page", async () => {
+    // The trail is rendered in a UI and screenshotted into tickets. A password
+    // that reaches it is a password in a screenshot.
+    getScreen.mockResolvedValue({
+      ok: true,
+      dataUrl: "data:image/jpeg;base64,AAAA",
+      url: "https://example.com/login",
+      title: "Sign in",
+      trail: [{ action: "type", target: "ref 7 (text withheld)", ok: true, url: "", error: "" }],
+    });
+    getBot.mockResolvedValue(detail({ pending: [] }));
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Screen" }));
+
+    expect(await screen.findByText(/text withheld/)).toBeInTheDocument();
+  });
+
+  it("says a bot with no browser has not opened one, rather than erroring", async () => {
+    getScreen.mockResolvedValue({ ok: false, dataUrl: null, url: "", title: "" });
+    getBot.mockResolvedValue(detail({ pending: [] }));
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Screen" }));
+    expect(await screen.findByText(/has not opened a browser/)).toBeInTheDocument();
   });
 
   it("says why the system paused a bot, where the roster shows it", async () => {

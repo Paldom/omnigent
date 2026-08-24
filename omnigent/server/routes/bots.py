@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 from fastapi import APIRouter, Request
@@ -62,9 +62,9 @@ def _token() -> str | None:
     return secret or None
 
 
-async def wheel_refusal_for_session(session_id: str) -> str:
+async def wheel_refusal_for_profile(profile: str) -> str:
     """
-    Whether a person has taken the browser of the bot that owns this session.
+    Whether a person has taken the browser this action would drive.
 
     Lives here because this module already holds the loopback client and the
     token, so the browser route can ask without importing ``army`` or learning
@@ -74,16 +74,16 @@ async def wheel_refusal_for_session(session_id: str) -> str:
     not freeze every bot's browser, and this refusal is a courtesy to the agent
     rather than a boundary.
 
-    :param session_id: The Omnigent conversation about to act.
+    :param profile: The browser profile the action would drive.
     :returns: The refusal text, or ``""`` to proceed.
     """
     token = _token()
-    if token is None or not session_id:
+    if token is None or not profile:
         return ""
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(
-                f"{_base_url()}/api/wheel/{session_id}",
+                f"{_base_url()}/api/wheel/{quote(profile, safe='')}",
                 headers={"Authorization": f"Bearer {token}"},
             )
         if response.status_code != 200:
@@ -198,19 +198,29 @@ def create_bots_router(*, auth_provider: AuthProvider | None = None) -> APIRoute
             },
         )
 
-    @router.get("/bots/wheel/{session_id}")
-    async def wheel_for_session(request: Request, session_id: str) -> dict[str, Any]:
+    @router.get("/bots/{slug}/screen")
+    async def screen(request: Request, slug: str, fresh: bool = True) -> dict[str, Any]:
         """
-        Whether a browser action for this session must be refused.
+        The current view of a bot's browser.
 
-        Asked by the desktop relay after it wins the claim and before it drives
-        the page. Fails open in every direction — Bot mode not running, no
-        wheel held, unknown session — because a control-plane hiccup that
-        silently froze every browser is a worse failure than one missed
-        refusal.
+        A JPEG data URL, taken from the same Chromium page the bot's
+        ``browser_*`` actions drive — so this is the browser being used rather
+        than a picture of one nobody is looking at.
+
+        Behind this server's authentication on purpose. A frame of a
+        logged-in page plus an input endpoint is full session control, so it
+        never leaves the authenticated origin and is never written to disk:
+        a one-time code lives in a frame for as long as the frame does.
         """
         require_user(request, auth_provider)
-        return await _forward("GET", f"/api/wheel/{session_id}")
+        from omnigent.browser import gateway
+
+        # The frame says where the browser is; the trail says how it got there.
+        # A picture alone cannot distinguish a bot that read a page from one
+        # that clicked through four and ended up somewhere it should not be.
+        frame = await gateway().frame(f"bot-{slug}", fresh=fresh)
+        frame["trail"] = gateway().trail(f"bot-{slug}")
+        return frame
 
     @router.post("/bots/wheel")
     async def wheel(request: Request) -> dict[str, Any]:

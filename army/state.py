@@ -69,7 +69,14 @@ LEGAL: dict[RunState, frozenset[RunState]] = {
     RunState.COLLECTING: frozenset(
         {RunState.COLLECTING, RunState.EVALUATING, RunState.READY, RunState.FAILED}
     ),
-    RunState.EVALUATING: frozenset({RunState.WAITING_HUMAN, RunState.FAILED}),
+    # ``COMPLETED`` is reachable from here for one specific shape of iteration:
+    # the one with nothing to ask. A watcher that found the page unchanged, or
+    # a scan whose queue was empty, produced no decision — and parking it on a
+    # person trains them to acknowledge noise, which is how the acknowledgement
+    # that mattered gets given by reflex. It is not a way to skip a question a
+    # workload *does* have: the workload signals it by returning an empty
+    # question from ``evaluate``, and anything with a question still parks.
+    RunState.EVALUATING: frozenset({RunState.WAITING_HUMAN, RunState.COMPLETED, RunState.FAILED}),
     RunState.WAITING_HUMAN: frozenset(
         {RunState.CONTINUE, RunState.PAUSED, RunState.COMPLETED, RunState.FAILED}
     ),

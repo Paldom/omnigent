@@ -32,6 +32,7 @@ from army.bots.spawn import SpawnRefused, SpawnStore
 from army.bots.store import BotStore
 from army.bots.supervisor import BotSupervisor, wake_now
 from army.bots.web import BotsSite, read_or_mint_token, serve
+from army.bots.wheel import WheelStore
 from army.bots.workspace import Workspace
 from army.config import Config
 from army.gates import GateRefused, Grant
@@ -609,6 +610,7 @@ def cmd_serve(config: Config, args: argparse.Namespace) -> int:
         spawns=SpawnStore(bots, budgets),
         budgets=budgets,
         workspace=Workspace(bots),
+        wheels=WheelStore(bots),
     )
     server = serve(site, host=args.host, port=args.port)
     # The link carries the token so it can be opened on a phone. It is also the

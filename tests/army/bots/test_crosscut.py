@@ -641,3 +641,97 @@ def test_a_message_to_a_run_with_no_session_is_not_stranded(bots: BotStore, stor
     # Still owed, so the next iteration's brief picks it up.
     assert messages.waiting_recipients(now=NOW).get(bot.address) == 1
     assert fleet._take_messages(bot, now=NOW) == ["check the last row date"]
+
+
+def test_questions_waiting_on_a_person_do_not_stall_the_fleet(
+    bots: BotStore, store: Store
+) -> None:
+    """
+    A run parked on a human holds no vendor seat, so it must hold no slot.
+
+    Counting it against `max_concurrent_runs` meant three unanswered questions
+    stopped every other bot — the opposite of the doctrine the cap serves. The
+    limit is on iterations in flight against a subscription, not on rows.
+    """
+    from army.bots.registry import WorkloadRegistry
+    from army.bots.supervisor import BotSupervisor
+    from army.state import Run, RunState
+
+    fleet = BotSupervisor(store, FakeOmni(), bots, WorkloadRegistry(), max_concurrent_runs=2)
+    # Two bots parked on a person, which is the whole cap under the old rule.
+    for slug in ("asker-one", "asker-two"):
+        bot = activate(bots, make_bot(slug, workload=HEARTBEAT), now=NOW)
+        run = store.create_run(Run.new("w", {}, now=NOW, bot_id=bot.id))
+        for step in (
+            RunState.DISPATCHING,
+            RunState.COLLECTING,
+            RunState.EVALUATING,
+            RunState.WAITING_HUMAN,
+        ):
+            run = store.transition(run, step, now=NOW)
+
+    parked = [r for r in store.active_runs() if r.state is RunState.WAITING_HUMAN]
+    assert len(parked) == 2
+
+    # A third bot, due now, with work. It must still get a run.
+    from army.bots.supervisor import wake_now
+
+    worker = activate(bots, make_bot("worker", workload=HEARTBEAT), now=NOW)
+    wake_now(bots, worker, now=NOW)
+    report = fleet.fleet_tick(now=NOW + 1)
+    assert report.started == 1, "a bot with work was stalled by questions nobody had answered"
+
+
+def test_a_watcher_with_nothing_to_report_asks_nobody(bots: BotStore, store: Store) -> None:
+    """
+    An empty question settles the iteration instead of parking it on a person.
+
+    Every other iteration ends in an approval, which is right when the
+    iteration produced a decision. "The page did not change" is not a decision,
+    and asking anyway trains an operator to acknowledge noise — which is how
+    the one that mattered gets acknowledged by reflex.
+    """
+    from army.bots.registry import WorkloadRegistry
+    from army.bots.supervisor import BotSupervisor, wake_now
+    from army.state import RunState
+
+    class Quiet:
+        """A workload that looked, found nothing, and says so."""
+
+        name = "quiet"
+
+        def acquire(self):
+            return {"looked": True}
+
+        def dispatch(self, run, omni):
+            return []
+
+        def collect(self, run, omni):
+            return True, {}
+
+        def evaluate(self, run):
+            return "", [], {"verdict": "UNCHANGED"}
+
+        def apply(self, run, decision, payload):
+            return "continue", "acknowledged"
+
+    class OneWorkload(WorkloadRegistry):
+        def for_bot(self, bot):
+            return Quiet()
+
+        def resolve(self, path, options=None):
+            return Quiet()
+
+    fleet = BotSupervisor(store, FakeOmni(), bots, OneWorkload())
+    bot = activate(bots, make_bot("watcher", workload=HEARTBEAT), now=NOW)
+    wake_now(bots, bot, now=NOW)
+
+    for offset in range(5):
+        fleet.fleet_tick(now=NOW + offset)
+
+    runs = store.list_runs()
+    assert runs, "the watcher never ran"
+    assert runs[0].state is RunState.COMPLETED
+    assert runs[0].artifacts.get("asked") is False
+    # And nobody was asked anything.
+    assert not [r for r in runs if r.state is RunState.WAITING_HUMAN]

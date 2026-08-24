@@ -14,11 +14,14 @@ import {
   answerApproval,
   getBot,
   getWorkspace,
+  getScreen,
   listBots,
   sayToBot,
+  setWheel,
   signOwnerRequest,
   type BotDetail,
   type BotFleet,
+  type BotScreen,
   type WorkspaceView,
 } from "@/lib/botsApi";
 
@@ -142,6 +145,37 @@ export function useSayToBot(slug: string | null) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: sayToBot,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: BOTS_KEY });
+      if (slug) void queryClient.invalidateQueries({ queryKey: botKey(slug) });
+    },
+  });
+}
+
+/**
+ * What a bot's browser is showing.
+ *
+ * Polled while the panel is open and not otherwise — a frame is a screenshot
+ * of a real Chromium and taking one wakes the browser. Two seconds is fast
+ * enough to watch a bot work and slow enough that nine of them do not melt a
+ * laptop; the gateway captures after every action anyway, so this mostly
+ * fetches an already-taken frame.
+ */
+export function useScreen(slug: string | null, open: boolean) {
+  return useQuery<BotScreen>({
+    queryKey: ["bot-screen", slug],
+    queryFn: () => getScreen(slug as string),
+    enabled: Boolean(slug) && open,
+    refetchInterval: 2_000,
+    retry: false,
+  });
+}
+
+/** Take a bot's browser, or hand it back. */
+export function useWheel(slug: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: setWheel,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: BOTS_KEY });
       if (slug) void queryClient.invalidateQueries({ queryKey: botKey(slug) });

@@ -42,6 +42,7 @@ import asyncio
 import base64
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,67 @@ ACTION_TIMEOUT_S = 25.0
 #: browser over a local connection several times a second.
 FRAME_QUALITY = 60
 
+#: How many past actions the trail keeps. Enough to see how a page was reached,
+#: short enough that it stays readable next to the frame.
+TRAIL_LENGTH = 30
+
+#: How much page text one snapshot returns.
+SNAPSHOT_CHARS = 20_000
+
+#: How many interactive elements one snapshot names. A ref list is what lets an
+#: agent click something it just read about; unbounded, a link farm would spend
+#: the whole context describing itself.
+MAX_REFS = 200
+
+#: The attribute a snapshot stamps on interactive elements so a later click can
+#: name one. Written into the live DOM, which is why it is namespaced.
+REF_ATTR = "data-omni-ref"
+
+#: Tags and roles worth naming. Everything here is something a person could
+#: click or type into; static text gets read from the snapshot instead.
+_INTERACTIVE = (
+    "a[href],button,input,select,textarea,summary,"
+    '[role="button"],[role="link"],[role="tab"],[role="checkbox"],'
+    '[contenteditable="true"],[onclick]'
+)
+
+#: Tags a ref list must never carry a value for. A snapshot that echoes what is
+#: typed into a password box puts the credential in the transcript, the run
+#: artifacts, and anything downstream that reads them.
+_SECRET_TYPES = ("password",)
+
+_SNAPSHOT_JS = """
+(args) => {
+  const [selector, refAttr, maxRefs, chars, secretTypes] = args;
+  const elements = [];
+  let n = 0;
+  for (const el of document.querySelectorAll(selector)) {
+    if (elements.length >= maxRefs) break;
+    const box = el.getBoundingClientRect();
+    if (!box.width || !box.height) continue;
+    const ref = ++n;
+    el.setAttribute(refAttr, String(ref));
+    const type = el.getAttribute('type') || '';
+    const secret = secretTypes.includes(type.toLowerCase());
+    const label = (
+      el.getAttribute('aria-label') ||
+      (secret ? '' : el.value) ||
+      el.innerText ||
+      el.getAttribute('placeholder') ||
+      el.getAttribute('title') ||
+      ''
+    );
+    elements.push({
+      ref,
+      tag: el.tagName.toLowerCase(),
+      type: type || undefined,
+      name: String(label).replace(/\\s+/g, ' ').trim().slice(0, 80),
+    });
+  }
+  return {text: (document.body?.innerText ?? '').slice(0, chars), elements};
+}
+"""
+
 
 class BrowserUnavailable(RuntimeError):
     """Playwright is not installed, or no browser could be started."""
@@ -88,6 +150,17 @@ class _Profile:
     #: Serialises actions on this page. Two clicks interleaved on one page is
     #: a class of bug nobody can reproduce.
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: How many screenshots this profile has taken, so each gets its own file
+    #: and an agent comparing before-and-after still has the before.
+    shots: int = 0
+    #: How many snapshots, and the id of the newest. ``None`` means the refs in
+    #: the DOM belong to a document that is gone.
+    snapshot: int = 0
+    snapshot_id: str | None = None
+    #: The last :data:`TRAIL_LENGTH` actions, so a person can see what the bot
+    #: did rather than only where it ended up. Bounded because this lives for
+    #: as long as the browser does and nothing prunes it.
+    trail: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=TRAIL_LENGTH))
 
 
 class BrowserGateway:
@@ -128,7 +201,7 @@ class BrowserGateway:
         self._playwright = await async_playwright().start()
         return self._playwright
 
-    async def _profile_for(self, name: str) -> _Profile:
+    async def _profile_for(self, profile: str) -> _Profile:
         """
         The browser for one profile, launching it if it is not resident.
 
@@ -138,6 +211,10 @@ class BrowserGateway:
         Deleting that lockfile to "fix" a stuck profile corrupts it; closing the
         owner is the fix.
         """
+        # One spelling wins. ``persist:bot-x`` from a bot definition and
+        # ``bot-x`` from the Screen panel are the same browser; keyed apart they
+        # would be two Chromiums fighting over one profile's SingletonLock.
+        name = _canonical(profile)
         existing = self._profiles.get(name)
         if existing is not None:
             existing.last_used = time.monotonic()
@@ -161,10 +238,10 @@ class BrowserGateway:
             except Exception as exc:
                 raise BrowserUnavailable(f"could not start a browser for {name}: {exc}") from exc
             page = context.pages[0] if context.pages else await context.new_page()
-            profile = _Profile(name=name, context=context, page=page, last_used=time.monotonic())
-            self._profiles[name] = profile
+            entry = _Profile(name=name, context=context, page=page, last_used=time.monotonic())
+            self._profiles[name] = entry
             _logger.info("browser gateway: opened profile %s", name)
-            return profile
+            return entry
 
     async def _evict_if_full(self) -> None:
         """Close the least recently used profile when at the cap."""
@@ -178,11 +255,11 @@ class BrowserGateway:
 
         :param name: The profile.
         """
-        profile = self._profiles.pop(name, None)
-        if profile is None:
+        entry = self._profiles.pop(_canonical(name), None)
+        if entry is None:
             return
         try:
-            await profile.context.close()
+            await entry.context.close()
         except Exception:  # noqa: BLE001 - closing a dead browser is not an error
             _logger.debug("browser gateway: %s was already gone", name, exc_info=True)
         _logger.info("browser gateway: closed profile %s", name)
@@ -229,15 +306,60 @@ class BrowserGateway:
             except TimeoutError:
                 # Deliberately not a retry. A click that timed out may have
                 # landed; repeating it is how one order becomes two.
-                return {
+                result = {
                     "ok": False,
                     "error": f"{action} did not finish in {ACTION_TIMEOUT_S:.0f}s",
                 }
+                self._record(entry, action, args, result)
+                return result
             except Exception as exc:  # noqa: BLE001 - a page can fail in any way
-                return {"ok": False, "error": f"{action} failed: {exc}"}
+                result = {"ok": False, "error": f"{action} failed: {exc}"}
+                self._record(entry, action, args, result)
+                return result
+            self._record(entry, action, args, result)
             entry.last_used = time.monotonic()
             await self._capture(entry)
             return result
+
+    def _record(
+        self, entry: _Profile, action: str, args: dict[str, Any], result: dict[str, Any]
+    ) -> None:
+        """
+        Keep a short, readable trail of what this browser was made to do.
+
+        A live frame answers "where is it now" and nothing else. Watching a bot
+        work means seeing the steps — and after the fact, a refused or wrong
+        action is only explicable if what was attempted was written down. This
+        is that record: what, to what, and whether it worked.
+
+        Never the typed text, and never a screenshot's bytes. The trail is
+        shown in a UI and read by whoever asks; a password that reaches it is
+        a password in a log.
+
+        :param entry: The profile.
+        :param action: The action performed.
+        :param args: Its arguments.
+        :param result: What came back.
+        """
+        entry.trail.append(
+            {
+                "action": action,
+                "target": _target_summary(action, args),
+                "ok": bool(result.get("ok")),
+                "url": str(result.get("url") or ""),
+                "error": str(result.get("error") or ""),
+            }
+        )
+
+    def trail(self, profile: str) -> list[dict[str, Any]]:
+        """
+        What this browser was recently made to do, oldest first.
+
+        :param profile: Whose browser.
+        :returns: The recorded actions, or ``[]`` for a browser never opened.
+        """
+        entry = self._profiles.get(_canonical(profile))
+        return list(entry.trail) if entry is not None else []
 
     async def _dispatch(
         self, entry: _Profile, action: str, args: dict[str, Any]
@@ -249,29 +371,70 @@ class BrowserGateway:
             if not url:
                 return {"ok": False, "error": "navigate needs a url"}
             await page.goto(url, wait_until="domcontentloaded")
+            # Every ref belonged to the old document. Dropping the snapshot id
+            # turns a click on a stale ref into a clear "snapshot first" rather
+            # than an eight-second wait for a selector that cannot match.
+            entry.snapshot_id = None
             return {"ok": True, "url": page.url, "title": await page.title()}
         if action == "snapshot":
-            # The accessibility tree, not a screenshot: it is what a model
-            # reads well, and it costs a fraction of the vision tokens.
-            text = await page.evaluate("() => document.body?.innerText?.slice(0, 20000) ?? ''")
-            return {"ok": True, "url": page.url, "title": await page.title(), "text": text}
-        if action == "click":
-            selector = str(args.get("selector") or args.get("ref") or "")
-            if not selector:
-                return {"ok": False, "error": "click needs a selector"}
-            await page.click(selector, timeout=8_000)
-            return {"ok": True, "url": page.url}
-        if action == "type":
-            selector = str(args.get("selector") or args.get("ref") or "")
-            text = str(args.get("text", ""))
-            if not selector:
-                return {"ok": False, "error": "type needs a selector"}
-            await page.fill(selector, text, timeout=8_000)
+            # Text plus a ref for everything clickable. The text alone is what
+            # this returned first, and an agent that can read a page but cannot
+            # name anything on it has to guess CSS selectors or give up — the
+            # first live run gave up and fetched the HTML with curl instead.
+            result = await page.evaluate(
+                _SNAPSHOT_JS,
+                [_INTERACTIVE, REF_ATTR, MAX_REFS, SNAPSHOT_CHARS, list(_SECRET_TYPES)],
+            )
+            elements = result.get("elements") or []
+            entry.snapshot += 1
+            entry.snapshot_id = f"snap_{entry.snapshot}"
+            return {
+                "ok": True,
+                "snapshot_id": entry.snapshot_id,
+                "url": page.url,
+                "title": await page.title(),
+                "text": result.get("text", ""),
+                "tree": "\n".join(_line(element) for element in elements),
+                # Say so rather than letting a truncated list read as the whole
+                # page: an agent that thinks it has seen every control will
+                # conclude the one it wants does not exist.
+                "truncated": len(elements) >= MAX_REFS,
+            }
+        if action in ("click", "type"):
+            selector, error = _target(args, entry)
+            if error:
+                return {"ok": False, "error": error}
+            if action == "click":
+                await page.click(selector, timeout=8_000)
+                return {"ok": True, "url": page.url}
+            await page.fill(selector, str(args.get("text", "")), timeout=8_000)
+            # Deliberately no echo of the text. A tool result is transcript.
             return {"ok": True, "url": page.url}
         if action == "screenshot":
+            # A path, not the pixels. Returning a data URL put 60k characters
+            # of base64 into one tool result, which overran the model's output
+            # limit and cost the agent two turns working around it. A file the
+            # agent can read when it actually needs to look is both smaller and
+            # what it wanted; the live frame for a watching human is served by
+            # :meth:`frame`, which never goes near the model.
             shot = await page.screenshot(type="jpeg", quality=FRAME_QUALITY)
-            return {"ok": True, "dataUrl": _data_url(shot), "url": page.url}
+            path = self._frame_path(entry)
+            path.write_bytes(shot)
+            return {
+                "ok": True,
+                "path": str(path),
+                "bytes": len(shot),
+                "url": page.url,
+                "hint": "read this path to look at the page",
+            }
         return {"ok": False, "error": f"unknown browser action {action!r}"}
+
+    def _frame_path(self, entry: _Profile) -> Path:
+        """Where this profile's next screenshot goes, outside its browser data."""
+        directory = self.root / "_shots"
+        directory.mkdir(parents=True, exist_ok=True)
+        entry.shots += 1
+        return directory / f"{entry.name}-{entry.shots:03d}.jpg"
 
     # ── what a person sees ────────────────────────────────────────
 
@@ -293,7 +456,7 @@ class BrowserGateway:
             cached one is for opening the panel without waking a browser.
         :returns: ``{ok, dataUrl, url, title}`` or a refusal.
         """
-        entry = self._profiles.get(profile)
+        entry = self._profiles.get(_canonical(profile))
         if entry is None:
             if not fresh:
                 return {"ok": False, "error": "that browser is not open"}
@@ -314,6 +477,91 @@ class BrowserGateway:
     def resident(self) -> list[str]:
         """Which profiles have a browser open right now."""
         return sorted(self._profiles)
+
+
+def _canonical(profile: str) -> str:
+    """
+    A profile name reduced to one canonical, filesystem-safe form.
+
+    Used for both the directory and the in-memory key, so a profile opened as
+    ``persist:bot-x`` is the same browser the Screen panel finds under
+    ``bot-x``. Two spellings of one profile would launch two Chromiums fighting
+    over one ``SingletonLock``, and the panel would show the wrong one.
+
+    Bot profiles are named ``persist:bot-<slug>`` — an Electron partition key,
+    which is where that prefix comes from. The colon is dropped because this is
+    a filesystem path, and everything outside a small alphabet is replaced
+    rather than trusted: this string arrives from a session label, and a name
+    containing ``..`` would otherwise choose the directory.
+
+    :param profile: The profile name.
+    :returns: A directory name.
+    """
+    bare = profile.removeprefix("persist:") or profile
+    safe = "".join(char if (char.isalnum() or char in "._-") else "_" for char in bare)
+    return safe.strip(".") or "default"
+
+
+def _target_summary(action: str, args: dict[str, Any]) -> str:
+    """
+    What an action was aimed at, in a few words and with no secrets in it.
+
+    ``type`` names its field and never its text: the trail is shown in a UI,
+    and a password that reaches a UI is a password in a screenshot.
+
+    :param action: The action.
+    :param args: Its arguments.
+    :returns: A short description, possibly empty.
+    """
+    if action == "navigate":
+        return str(args.get("url") or "")[:120]
+    ref = args.get("ref")
+    selector = str(args.get("selector") or "")[:80]
+    if action in ("click", "type"):
+        where = f"ref {ref}" if ref is not None else selector
+        return f"{where} (text withheld)" if action == "type" else where
+    return ""
+
+
+def _line(element: dict[str, Any]) -> str:
+    """One snapshot element, in the ``[ref=N]`` form the tool schema promises."""
+    kind = element.get("type") or element.get("tag")
+    name = element.get("name") or ""
+    return f'- {kind} "{name}" [ref={element.get("ref")}]'
+
+
+def _target(args: dict[str, Any], entry: _Profile) -> tuple[str, str]:
+    """
+    Resolve a click/type target to a selector, or say precisely what is wrong.
+
+    A ``ref`` only means anything against the snapshot that minted it. The
+    attribute is re-stamped on every snapshot, so ref 3 is a different element
+    after the next one — acting on a superseded ref would click a plausible
+    wrong thing silently, which is the worst available outcome.
+
+    :param args: The tool's arguments.
+    :param entry: The profile, holding the current snapshot id.
+    :returns: ``(selector, "")`` or ``("", reason)``.
+    """
+    ref = args.get("ref")
+    if ref is not None and str(ref).strip() != "":
+        if entry.snapshot_id is None:
+            return "", "no snapshot to resolve that ref against — take a browser_snapshot first"
+        given = str(args.get("snapshot_id") or "").strip()
+        if given and given != entry.snapshot_id:
+            return "", (
+                f"ref {ref} came from {given}, which has been superseded by "
+                f"{entry.snapshot_id} — take a browser_snapshot and use its refs"
+            )
+        # Digits only: this is concatenated into a selector, and a ref is
+        # generated, so anything else is either a bug or an injection attempt.
+        if not str(ref).strip().isdigit():
+            return "", f"ref must be a non-negative integer, got {ref!r}"
+        return f'[{REF_ATTR}="{str(ref).strip()}"]', ""
+    selector = str(args.get("selector") or "").strip()
+    if selector:
+        return selector, ""
+    return "", "needs a ref from a recent browser_snapshot, or a CSS selector"
 
 
 def _data_url(image: bytes) -> str:

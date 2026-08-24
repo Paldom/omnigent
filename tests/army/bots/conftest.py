@@ -33,6 +33,10 @@ class FakeOmni:
         #: What a person typed into the session after the question. The bot
         #: supervisor must read these and refuse to treat them as an answer.
         self.replies: list[str] = []
+        #: What the *agent* said. Kept separate from :attr:`replies` on
+        #: purpose: a fake that returns one list for both roles lets a
+        #: workload read human answers as its agent's work and still pass.
+        self.agent_replies: list[str] = []
 
     def create_session(self, agent_id: str, **kwargs: Any) -> str:
         session_id = f"conv_{len(self.sessions):032d}"
@@ -54,6 +58,9 @@ class FakeOmni:
 
     def replies_after(self, session_id: str, marker: str) -> list[str]:
         return list(self.replies)
+
+    def agent_said(self, session_id: str) -> list[str]:
+        return list(self.agent_replies)
 
     def was_told(self, session_id: str, text: str) -> bool:
         return True

@@ -477,3 +477,86 @@ async def test_action_request_cross_user_forbidden(auth_client: httpx.AsyncClien
         headers={"X-Forwarded-Email": "bob@example.com"},
     )
     assert resp.status_code in (403, 404), resp.text
+
+
+# ── the other executor: a bot's session drives the server-owned gateway ──
+
+
+async def test_a_labelled_session_goes_to_the_gateway_not_the_desktop(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A session labelled with a browser profile executes in the gateway.
+
+    This is the whole point of the label: a background bot has no subscribed
+    Electron renderer, so parking the action means a 30s timeout and an agent
+    that falls back to fetching the page some other way — which is exactly what
+    the first live watcher run did while reporting success. The first version
+    of this route read the profile with a store method that does not exist and
+    swallowed the ``AttributeError``, so every bot silently took the desktop
+    path. A broad ``except`` here is indistinguishable from "not a bot".
+    """
+    performed: list[tuple[str, str, dict[str, Any]]] = []
+
+    class _FakeGateway:
+        async def perform(self, profile: str, action: str, args: dict[str, Any]) -> dict[str, Any]:
+            performed.append((profile, action, args))
+            return {"ok": True, "url": args.get("url"), "title": "Fee Schedule"}
+
+    monkeypatch.setattr("omnigent.browser.gateway", lambda: _FakeGateway())
+
+    agent = await create_test_agent(client, "test-browser-gateway-route")
+    resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "labels": {"omnigent.browser.profile": "bot-kraken-fee-watch"},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    session_id = resp.json()["id"]
+
+    # No renderer is subscribed and none is needed: this must return promptly
+    # rather than parking for the full await budget.
+    async with asyncio.timeout(10):
+        action = await client.post(
+            f"/v1/sessions/{session_id}/browser/action_request",
+            json={"action": "navigate", "args": {"url": "https://www.kraken.com/fees"}},
+        )
+
+    assert action.status_code == 200, action.text
+    assert action.json() == {
+        "ok": True,
+        "url": "https://www.kraken.com/fees",
+        "title": "Fee Schedule",
+    }
+    assert performed == [
+        ("bot-kraken-fee-watch", "navigate", {"url": "https://www.kraken.com/fees"})
+    ]
+
+
+async def test_an_unlabelled_session_still_parks_for_the_desktop(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ordinary conversation keeps the renderer path, gateway untouched."""
+
+    class _Exploding:
+        async def perform(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("a person's conversation must not hit the gateway")
+
+    monkeypatch.setattr("omnigent.browser.gateway", lambda: _Exploding())
+
+    agent = await create_test_agent(client, "test-browser-desktop-route")
+    session_id = await _create_session(client, agent["id"])
+    request_task, action_id = await _park_action_request(client, session_id)
+
+    claim = await client.post(f"/v1/sessions/{session_id}/browser/action_claim/{action_id}")
+    token = claim.json()["claim_token"]
+    await client.post(
+        f"/v1/sessions/{session_id}/browser/action_result/{action_id}",
+        json={"result": {"final_url": "https://example.com"}, "claim_token": token},
+    )
+    resp = await request_task
+    assert resp.json() == {"final_url": "https://example.com"}

@@ -74,7 +74,7 @@ def register_browser_routes(
 ) -> None:
     """Register the browser routes on router."""
 
-    async def _gateway_profile(store: Any, session_id: str) -> str | None:
+    def _gateway_profile(store: Any, session_id: str) -> str | None:
         """
         The browser profile this session should drive, if it is a bot's.
 
@@ -82,21 +82,23 @@ def register_browser_routes(
         hot path is a store read the route already has rights to and the
         server keeps importing nothing from ``army``.
 
+        Deliberately not wrapped in ``except Exception``. A broad catch here
+        reads every failure as "not a bot" and silently sends the action to a
+        desktop renderer that does not exist, where it dies as a 30s timeout —
+        which is exactly how a wrong method name survived a live run.
+
         :param store: The conversation store.
         :param session_id: The session.
         :returns: The profile name, or ``None`` for an ordinary conversation.
         """
-        try:
-            conversation = await store.get(session_id)
-        except Exception:
-            return None
+        conversation = store.get_conversation(session_id)
         labels = getattr(conversation, "labels", None) or {}
         profile = labels.get(_BROWSER_PROFILE_LABEL)
         return str(profile) if profile else None
 
-    async def _wheel_refusal(session_id: str) -> str:
+    async def _wheel_refusal(profile: str) -> str:
         """
-        Whether a person has taken this session's browser, and what to say.
+        Whether a person has taken this browser, and what to say.
 
         Asked over the same loopback boundary the bots proxy uses, so this
         module imports nothing from ``army``. Fails **open**: a control plane
@@ -104,13 +106,13 @@ def register_browser_routes(
         refusal is a courtesy to the agent rather than the boundary — nothing
         here is what stops a bot doing something it must not.
 
-        :param session_id: The session about to act.
+        :param profile: The browser profile the action would drive.
         :returns: The refusal text, or ``""`` to proceed.
         """
         try:
-            from omnigent.server.routes.bots import wheel_refusal_for_session
+            from omnigent.server.routes.bots import wheel_refusal_for_profile
 
-            return await wheel_refusal_for_session(session_id)
+            return await wheel_refusal_for_profile(profile)
         except Exception:
             return ""
 
@@ -162,9 +164,9 @@ def register_browser_routes(
         # tool, same arguments, same result shape — a different executor,
         # because a background fleet has no subscribed renderer and its actions
         # would otherwise sit until they timed out.
-        profile = await _gateway_profile(conversation_store, session_id)
+        profile = _gateway_profile(conversation_store, session_id)
         if profile is not None:
-            refusal = await _wheel_refusal(session_id)
+            refusal = await _wheel_refusal(profile)
             if refusal:
                 # Refused, not queued. A queued click lands after the person
                 # has navigated away, on a page that is no longer the one it

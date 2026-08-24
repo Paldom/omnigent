@@ -218,7 +218,7 @@ class ResearchWorkload:
         if snapshot.status not in ("idle", "completed", "failed"):
             return False, {}
 
-        replies = omni.replies_after(session, "")
+        replies = omni.agent_said(session)
         reply = "\n".join(replies)[-_REPLY_CHARS:]
         return True, {"reply": reply, "session_status": snapshot.status}
 

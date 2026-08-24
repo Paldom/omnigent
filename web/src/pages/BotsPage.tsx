@@ -36,7 +36,9 @@ import {
   useBot,
   useBots,
   useSayToBot,
+  useScreen,
   useSignOwnerRequest,
+  useWheel,
   useWorkspace,
 } from "@/hooks/useBots";
 import type {
@@ -61,9 +63,10 @@ const DISC: Partial<Record<BotStatus, string>> = {
   due: "bg-[var(--status-yellow)]",
 };
 
-type DockTab = "files" | "runs" | "lineage" | "setup";
+type DockTab = "screen" | "files" | "runs" | "lineage" | "setup";
 
 const DOCK_TABS: { value: DockTab; label: string }[] = [
+  { value: "screen", label: "Screen" },
   { value: "files", label: "Files" },
   { value: "runs", label: "Runs" },
   { value: "lineage", label: "Lineage" },
@@ -782,16 +785,120 @@ function LineagePanel({
   );
 }
 
+/**
+ * What the bot's browser is showing, and the button that takes it from it.
+ *
+ * The same Chromium page its `browser_*` actions drive — the screen and the
+ * agent are looking at one page, which is what makes taking the wheel mean
+ * anything. A picture of a browser nobody was using would prove nothing.
+ *
+ * The caveat under the frame is not decoration. A vendor CLI can fetch a URL
+ * with its own tooling and nothing here observes that, so this says "browser"
+ * rather than implying "everything the bot does on the network".
+ */
+function Screen({
+  slug,
+  driver,
+  onWheel,
+  busy,
+}: {
+  slug: string;
+  driver: string | null;
+  onWheel: (take: boolean) => void;
+  busy: boolean;
+}) {
+  const screen = useScreen(slug, true);
+  const shot = screen.data;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border px-2.5 py-1.5">
+        <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground text-sm">
+          {shot?.url || "no page open"}
+        </span>
+        <Button
+          size="sm"
+          variant={driver ? "default" : "outline"}
+          disabled={busy}
+          onClick={() => onWheel(!driver)}
+        >
+          {driver ? "Hand back" : "Take the wheel"}
+        </Button>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-auto bg-muted p-2">
+        {driver && (
+          <p className="mb-2 rounded-otto-sm border border-[var(--status-yellow)] bg-card px-2 py-1.5 text-sm">
+            You have the wheel. Its browser actions are refused — not queued — until you hand it
+            back.
+          </p>
+        )}
+        {shot?.dataUrl ? (
+          <img
+            src={shot.dataUrl}
+            alt={`${slug}'s browser: ${shot.title || shot.url}`}
+            className="w-full rounded-otto-sm border border-border"
+          />
+        ) : (
+          <p className="text-muted-foreground text-sm">
+            {screen.isLoading
+              ? "Waking the browser…"
+              : (shot?.error ??
+                "This bot has not opened a browser. One starts the first time it navigates.")}
+          </p>
+        )}
+
+        {/* A frame says where the browser is; this says how it got there. A
+            picture alone cannot tell a bot that read one page from one that
+            clicked through four. Newest first — that is the one being asked
+            about. */}
+        {shot?.trail && shot.trail.length > 0 && (
+          <ol className="mt-2 rounded-otto-sm border border-border bg-card">
+            {[...shot.trail].reverse().map((step, index) => (
+              <li
+                key={`${shot.trail!.length - index}-${step.action}`}
+                className="flex items-baseline gap-2 border-border-weak border-b px-2 py-1 last:border-b-0"
+              >
+                <span
+                  aria-hidden
+                  className={`mt-1.5 size-2 shrink-0 rounded-full ${
+                    step.ok ? "bg-[var(--status-green)]" : "bg-[var(--status-red)]"
+                  }`}
+                />
+                <span className="shrink-0 font-mono text-sm">{step.action}</span>
+                <span className="min-w-0 flex-1 truncate text-muted-foreground text-sm">
+                  {step.error || step.target || step.url}
+                </span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+
+      <p className="shrink-0 border-t border-border px-2.5 py-2 text-muted-foreground text-sm">
+        This is the browser {slug} drives, not a network monitor — its harness can still fetch a URL
+        with its own tooling, and nothing here sees that.
+      </p>
+    </div>
+  );
+}
+
 function Dock({
   bot,
   tab,
   setTab,
   onSelect,
+  driver,
+  onWheel,
+  wheelBusy,
 }: {
   bot: BotDetail;
   tab: DockTab;
   setTab: (tab: DockTab) => void;
   onSelect: (slug: string) => void;
+  driver: string | null;
+  onWheel: (take: boolean) => void;
+  wheelBusy: boolean;
 }) {
   // The tab lives on the page, not here. Owning it locally meant the operator's
   // choice was lost every time the poll briefly cleared `detail.data` and this
@@ -817,11 +924,15 @@ function Dock({
         ))}
       </div>
 
+      {tab === "screen" && (
+        <Screen slug={bot.slug} driver={driver} onWheel={onWheel} busy={wheelBusy} />
+      )}
+
       {/* Files owns its own scrolling — it has a sticky breadcrumb and a
           preview that must not scroll with the tree above it. */}
       {tab === "files" && <WorkspaceBrowser slug={bot.slug} workspace={bot.workspace} />}
 
-      {tab !== "files" && (
+      {tab !== "files" && tab !== "screen" && (
         <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-2">
           {tab === "runs" && (
             <>
@@ -935,6 +1046,9 @@ export function BotsPage() {
   const sign = useSignOwnerRequest(slug);
   const adopt = useAdoptDraft();
   const say = useSayToBot(slug);
+  const wheel = useWheel(slug);
+  // Who is driving this bot's browser, from the roster the page already polls.
+  const driver = (slug && fleet.data?.driving?.[slug]?.driver) || null;
 
   // The most recent iteration that had a body. Newest-first from the store, so
   // the first hit is the one to open — a bot between iterations still links to
@@ -1262,6 +1376,14 @@ export function BotsPage() {
             tab={dockTab}
             setTab={setDockTab}
             onSelect={(target) => setSelection({ kind: "bot", slug: target })}
+            driver={driver}
+            wheelBusy={wheel.isPending}
+            onWheel={(take) =>
+              void run(
+                () => wheel.mutateAsync({ bot: detail.data!.slug, take }),
+                "The wheel did not change hands.",
+              )
+            }
           />
         )}
       </div>

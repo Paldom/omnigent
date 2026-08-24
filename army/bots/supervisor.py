@@ -369,6 +369,11 @@ class BotSupervisor(Supervisor):
         # the run was allowed to do, and "nobody recorded it" is the worst
         # possible answer.
         run.artifacts["sandbox"] = sandbox_for(bot)
+        # Which browser this iteration drives, taken from the bot rather than
+        # from a workload's own config key. A second place to name a bot's
+        # browser is a second thing to get out of step, and the one that gets
+        # edited is never the one the wheel looks up.
+        run.artifacts["browser_profile"] = bot.browser_profile or ""
         try:
             with self.bots.atomic() as conn:
                 self.store.create_run(run, conn=conn)
@@ -536,11 +541,30 @@ class BotSupervisor(Supervisor):
         only where it is *also* shown. A bot whose workload needs no sessions
         still asks, and is still answerable with ``army approve``.
 
+        A workload may also decline to ask, by returning an empty question.
+        That is not a failure and not a silent success — it is a whole class of
+        iteration whose honest end is "nothing happened": a watcher that found
+        the page unchanged, a scan with an empty queue. Asking anyway trains an
+        operator to acknowledge noise, and an operator who acknowledges by
+        reflex is one who will acknowledge the one that mattered.
+
         :param run: The run, in ``EVALUATING``.
         :param now: Epoch seconds.
-        :returns: The run, parked on a person.
+        :returns: The run, parked on a person — or settled, if it had nothing
+            to ask.
         """
         question, options, evidence = self._workload_for(run).evaluate(run)
+        if not question:
+            # Settled rather than asked. The outcome policy turns this into a
+            # backoff, so a watcher with nothing to report gets quieter on its
+            # own instead of louder.
+            return self._transition(
+                run,
+                RunState.COMPLETED,
+                now=now,
+                artifacts={**run.artifacts, "evidence": evidence, "asked": False},
+                terminal_reason="nothing to report",
+            )
         artifacts = {
             **run.artifacts,
             "question": question,
