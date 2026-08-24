@@ -136,13 +136,32 @@ export interface Lineage {
 }
 
 /** One line in a bot's channel. */
+/**
+ * A mark on a message. Acknowledgement, never authority.
+ *
+ * There is deliberately no tick: beside a pending question a tick reads as
+ * "approved" to everyone who has ever used chat software, and an approval here
+ * binds to an action hash, a policy version and a run version. Nothing that
+ * does not may stand in for it.
+ */
+export type BotMark = "seen" | "useful" | "unclear" | "concern";
+
+export const MARKS: { value: BotMark; glyph: string; means: string }[] = [
+  { value: "seen", glyph: "👀", means: "I have read this" },
+  { value: "useful", glyph: "💡", means: "This was worth having" },
+  { value: "unclear", glyph: "❓", means: "I could not follow this" },
+  { value: "concern", glyph: "⚠️", means: "This makes me uneasy" },
+];
+
 export interface BotMessage {
+  id: string;
   seq: number;
   kind: "human_msg" | "bot_msg" | "bot_to_bot" | "ask" | "verdict" | "report" | "event";
   author: string;
   body: string;
   at: number;
   thread: string | null;
+  marks: BotMark[];
 }
 
 /** Everything the middle column and the dock need, in one round trip. */
@@ -461,6 +480,17 @@ export async function getScreen(slug: string, fresh = true): Promise<BotScreen> 
  * a queued click lands after you have navigated away, on a page that is no
  * longer the one it was reasoned about.
  */
+/**
+ * Mark a message, or take the mark back.
+ *
+ * Not a verdict, and the bot is told so in the same paragraph it is told about
+ * the mark — an acknowledgement a bot could read as permission would be worse
+ * than no acknowledgement at all.
+ */
+export async function reactToMessage(input: { message: string; mark: BotMark }): Promise<Verdict> {
+  return post("/v1/bots/react", input, "The mark did not stick.");
+}
+
 export async function setWheel(input: {
   bot: string;
   take: boolean;

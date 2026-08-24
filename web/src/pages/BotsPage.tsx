@@ -36,14 +36,17 @@ import {
   useBot,
   useBots,
   useSayToBot,
+  useReact,
   useScreen,
   useSignOwnerRequest,
   useWheel,
   useWorkspace,
 } from "@/hooks/useBots";
+import { MARKS } from "@/lib/botsApi";
 import type {
   BotApproval,
   BotDetail,
+  BotMark,
   BotDraft,
   BotRun,
   BotStatus,
@@ -576,16 +579,63 @@ function Composer({
 }
 
 /** One line in the channel. */
-function ChannelLine({ kind, author, body, at }: BotDetail["channel"][number]) {
-  const isAsk = kind === "ask";
+/**
+ * One line of the channel, and the lightest way to answer it.
+ *
+ * The marks are acknowledgement and carry no authority — which is why none of
+ * them is a tick. Beside a pending question a tick reads as "approved" to
+ * everyone who has ever used chat software, and an approval here binds to an
+ * action hash, a policy version and a run version. So the vocabulary says
+ * *seen*, *worth having*, *could not follow*, *uneasy* — and the row says so
+ * in as many words, because a control whose meaning has to be inferred is a
+ * control that will be misread.
+ */
+function ChannelLine({
+  message,
+  onMark,
+  busy,
+}: {
+  message: BotDetail["channel"][number];
+  onMark: (mark: BotMark) => void;
+  busy: boolean;
+}) {
+  const isAsk = message.kind === "ask";
   return (
-    <div className="border-t border-[var(--border-weak)] py-2.5">
+    <div className="group border-[var(--border-weak)] border-t py-2.5">
       <p className="m-0 flex items-baseline gap-2 text-muted-foreground text-sm">
-        <span className={cn("text-foreground", isAsk && "font-medium")}>{author}</span>
-        <span>{kind.replace(/_/g, " ")}</span>
-        <span className="ml-auto font-mono">{ago(at)}</span>
+        <span className={cn("text-foreground", isAsk && "font-medium")}>{message.author}</span>
+        <span>{message.kind.replace(/_/g, " ")}</span>
+        <span className="ml-auto font-mono">{ago(message.at)}</span>
       </p>
-      <p className="m-0 mt-0.5 whitespace-pre-wrap">{body}</p>
+      <p className="m-0 mt-0.5 whitespace-pre-wrap">{message.body}</p>
+
+      <div className="mt-1 flex items-center gap-1">
+        {MARKS.map((mark) => {
+          const on = message.marks.includes(mark.value);
+          return (
+            <button
+              key={mark.value}
+              type="button"
+              disabled={busy}
+              onClick={() => onMark(mark.value)}
+              aria-pressed={on}
+              title={`${mark.means} — this is not an approval`}
+              aria-label={`${mark.means}. This is not an approval.`}
+              className={cn(
+                "rounded-otto-button border px-1.5 py-0 text-sm leading-5",
+                on
+                  ? "border-border bg-muted"
+                  : "border-transparent text-muted-foreground opacity-0 group-focus-within:opacity-100 group-hover:opacity-100",
+              )}
+            >
+              {mark.glyph}
+            </button>
+          );
+        })}
+        {message.marks.length > 0 && (
+          <span className="text-muted-foreground text-sm">acknowledged — not an approval</span>
+        )}
+      </div>
     </div>
   );
 }
@@ -1085,6 +1135,7 @@ export function BotsPage() {
   const adopt = useAdoptDraft();
   const say = useSayToBot(slug);
   const wheel = useWheel(slug);
+  const react = useReact(slug);
   // Who is driving this bot's browser, from the roster the page already polls.
   const driver = (slug && fleet.data?.driving?.[slug]?.driver) || null;
 
@@ -1379,7 +1430,12 @@ export function BotsPage() {
                   <p className="pt-3 text-muted-foreground text-sm">Nothing said yet.</p>
                 ) : (
                   detail.data.channel.map((message) => (
-                    <ChannelLine key={message.seq} {...message} />
+                    <ChannelLine
+                      key={message.seq}
+                      message={message}
+                      busy={react.isPending}
+                      onMark={(mark) => react.mutate({ message: message.id, mark })}
+                    />
                   ))
                 )}
 

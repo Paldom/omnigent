@@ -31,6 +31,7 @@ from army.bots.approvals import ApprovalRefused, ApprovalStore
 from army.bots.budget import BudgetExhausted
 from army.bots.messages import MessageKind, MessageStore
 from army.bots.model import MAX_DEPTH, MAX_FANOUT, BotStatus, DerivedStatus
+from army.bots.reactions import ReactionRefused
 from army.bots.roster import RosterEntry, roster, summarise
 from army.bots.schedule import first_wake
 from army.bots.spawn import SpawnRefused
@@ -175,6 +176,9 @@ class BotsSite:
     :param budgets: The ledger, so the roster can say what is left.
     :param wheels: Who is driving each bot's browser, or ``None`` to disable
         control handoff entirely.
+    :param reactions: Marks on channel messages, or ``None`` to hide them. An
+        acknowledgement that deliberately carries no authority — see
+        :mod:`army.bots.reactions`.
     :param workspace: Resolves where a bot's directory is. Needed because
         ``bots.workspace`` is only set when a definition named one — a bot that
         took the default root has the column empty, and reading the column
@@ -192,6 +196,7 @@ class BotsSite:
         budgets: Any = None,
         workspace: Workspace | None = None,
         wheels: Any = None,
+        reactions: Any = None,
     ) -> None:
         self.store = store
         self.bots = bots
@@ -202,6 +207,7 @@ class BotsSite:
         self.budgets = budgets
         self.workspace = workspace if workspace is not None else Workspace(bots)
         self.wheels = wheels
+        self.reactions = reactions
 
     def authorises(self, supplied: str) -> bool:
         """
@@ -712,6 +718,37 @@ class BotsSite:
         )
         return "You have the wheel. Its browser actions are refused until you release it.", ""
 
+    def react(self, form: dict[str, list[str]], *, now: int) -> tuple[str, str]:
+        """
+        Mark a message as seen, useful, unclear or a concern.
+
+        The lightest thing a person can say, and the commonest thing they
+        actually want to say: in a fleet posting reports overnight, "I read
+        this" is most of the traffic and a sentence is a heavy instrument for
+        it.
+
+        It authorises nothing, and that is the design rather than a caveat. An
+        approval binds a verdict to an action hash, a policy version and a run
+        version; a mark binds to none of those and the bot is told so in the
+        same paragraph it is told about the mark.
+
+        :param form: ``message`` and ``mark``.
+        :param now: Epoch seconds.
+        :returns: ``(notice, problem)``, one of which is empty.
+        """
+        if self.reactions is None:
+            return "", "this control plane has no reactions"
+        message_id = _first(form, "message").strip()
+        if not _ID.fullmatch(message_id):
+            return "", "that is not a message id"
+        try:
+            now_present = self.reactions.toggle(
+                message_id, "human:channel", _first(form, "mark").strip(), now=now
+            )
+        except ReactionRefused as exc:
+            return "", str(exc)
+        return ("Marked." if now_present else "Mark removed."), ""
+
     def say(self, form: dict[str, list[str]], *, now: int) -> tuple[str, str]:
         """
         Say something to a bot.
@@ -980,6 +1017,8 @@ class BotsSite:
             return None
         entry = next((row for row in roster(self.bots, now=now) if row.bot.id == bot.id), None)
         pending = self.approvals.pending(bot_id=bot.id)
+        # One query for the whole channel rather than one per message.
+        marks = self.reactions.for_bot(bot.id) if self.reactions is not None else {}
         return json.dumps(
             {
                 "slug": bot.slug,
@@ -1016,12 +1055,14 @@ class BotsSite:
                 ],
                 "channel": [
                     {
+                        "id": message.id,
                         "seq": message.seq,
                         "kind": message.kind.value,
                         "author": message.author,
                         "body": message.body,
                         "at": message.created_at,
                         "thread": message.thread_id,
+                        "marks": sorted({mark.mark for mark in marks.get(message.id, [])}),
                     }
                     for message in self.messages.channel(bot.id, limit=60)
                 ],
@@ -1274,6 +1315,7 @@ class _Handler(BaseHTTPRequestHandler):
             "/spawn/adopt": self.site.adopt,
             "/say": self.site.say,
             "/wheel": self.site.wheel,
+            "/react": self.site.react,
         }
         action = actions.get(route.path)
         if action is None:

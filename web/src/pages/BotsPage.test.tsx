@@ -22,8 +22,9 @@ const getWorkspace = vi.fn();
 const sayToBot = vi.fn();
 const getScreen = vi.fn();
 const setWheel = vi.fn();
+const reactToMessage = vi.fn();
 
-vi.mock("@/lib/botsApi", () => ({
+vi.mock("@/lib/botsApi", async () => ({
   listBots: (...args: unknown[]) => listBots(...args),
   getBot: (...args: unknown[]) => getBot(...args),
   answerApproval: (...args: unknown[]) => answerApproval(...args),
@@ -33,6 +34,10 @@ vi.mock("@/lib/botsApi", () => ({
   sayToBot: (...args: unknown[]) => sayToBot(...args),
   getScreen: (...args: unknown[]) => getScreen(...args),
   setWheel: (...args: unknown[]) => setWheel(...args),
+  reactToMessage: (...args: unknown[]) => reactToMessage(...args),
+  // Not a mock: the vocabulary is the point of the feature, and a test that
+  // invented its own would not notice a tick being added to the real one.
+  MARKS: ((await vi.importActual("@/lib/botsApi")) as { MARKS: unknown }).MARKS,
 }));
 
 function bot(slug: string, overrides: Record<string, unknown> = {}) {
@@ -184,6 +189,7 @@ beforeEach(() => {
   adoptDraft.mockResolvedValue({ ok: true });
   sayToBot.mockResolvedValue({ ok: true });
   setWheel.mockResolvedValue({ ok: true });
+  reactToMessage.mockResolvedValue({ ok: true });
   getScreen.mockResolvedValue({
     ok: true,
     dataUrl: "data:image/jpeg;base64,AAAA",
@@ -625,6 +631,92 @@ describe("BotsPage", () => {
 
     expect(await screen.findByRole("button", { name: "Hand back" })).toBeInTheDocument();
     expect(screen.getByText(/refused — not queued/)).toBeInTheDocument();
+  });
+
+  it("marks a message, and says the mark is not an approval", async () => {
+    // The whole reason this feature is safe: an approval binds to an action
+    // hash, a policy version and a run version. Acknowledgement binds to none
+    // of them, and the row has to say so — a control whose meaning must be
+    // inferred is one that will be misread.
+    getBot.mockResolvedValue(
+      detail({
+        pending: [],
+        channel: [
+          {
+            id: "d".repeat(32),
+            seq: 1,
+            kind: "report",
+            author: "scout",
+            body: "Tier 1 spot: 0.40% / 0.80%.",
+            at: Date.now() / 1000 - 60,
+            thread: null,
+            marks: [],
+          },
+        ],
+      }),
+    );
+    renderPage();
+    await screen.findByText("Tier 1 spot: 0.40% / 0.80%.");
+
+    fireEvent.click(screen.getByRole("button", { name: /I have read this/ }));
+
+    await waitFor(() => expect(reactToMessage).toHaveBeenCalled());
+    expect(reactToMessage.mock.calls[0][0]).toEqual({ message: "d".repeat(32), mark: "seen" });
+    expect(screen.getByRole("button", { name: /I have read this/ })).toHaveAccessibleName(
+      /not an approval/,
+    );
+  });
+
+  it("offers no mark that reads as a tick", async () => {
+    // Beside a pending question, a tick is a verdict to everyone who has ever
+    // used chat software. The vocabulary is the safety property.
+    getBot.mockResolvedValue(
+      detail({
+        pending: [],
+        channel: [
+          {
+            id: "d".repeat(32),
+            seq: 1,
+            kind: "report",
+            author: "scout",
+            body: "a claim",
+            at: 0,
+            thread: null,
+            marks: [],
+          },
+        ],
+      }),
+    );
+    renderPage();
+    await screen.findByText("a claim");
+
+    for (const forbidden of [/approve/i, /accept/i, /^ok$/i, /confirm/i]) {
+      expect(screen.queryByRole("button", { name: forbidden })).not.toBeInTheDocument();
+    }
+  });
+
+  it("shows a mark somebody already made, labelled as acknowledgement", async () => {
+    getBot.mockResolvedValue(
+      detail({
+        pending: [],
+        channel: [
+          {
+            id: "d".repeat(32),
+            seq: 1,
+            kind: "report",
+            author: "scout",
+            body: "a claim",
+            at: 0,
+            thread: null,
+            marks: ["concern"],
+          },
+        ],
+      }),
+    );
+    renderPage();
+
+    expect(await screen.findByText(/acknowledged — not an approval/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /uneasy/ })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("shows a running bot working, with a way into the session", async () => {

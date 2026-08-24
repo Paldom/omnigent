@@ -264,6 +264,28 @@ def create_bots_router(*, auth_provider: AuthProvider | None = None) -> APIRoute
                 gateway().release(f"bot-{slug}")
         return answer
 
+    @router.post("/bots/react")
+    async def react(request: Request) -> dict[str, Any]:
+        """
+        Mark a message as seen, useful, unclear or a concern.
+
+        A separate route from the verdict for the same reason ``say`` is: an
+        approval binds to an action hash, a policy version and a run version,
+        and nothing that does not may stand in for it. There is deliberately no
+        mark that reads as a tick — beside a pending question, a tick is a
+        verdict to every human who has ever used chat software.
+        """
+        require_user(request, auth_provider)
+        body = await request.json()
+        return await _forward(
+            "POST",
+            "/react",
+            data={
+                "message": str(body.get("message", "")),
+                "mark": str(body.get("mark", "")),
+            },
+        )
+
     @router.post("/bots/say")
     async def say(request: Request) -> dict[str, Any]:
         """

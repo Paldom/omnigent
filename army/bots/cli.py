@@ -25,6 +25,7 @@ from army.bots.definition import EXAMPLE, InvalidDefinition, load_file, to_bot, 
 from army.bots.messages import MessageStore
 from army.bots.model import Bot, BotStatus, DerivedStatus, IllegalBotMove
 from army.bots.precondition import PreconditionRegistry
+from army.bots.reactions import ReactionStore
 from army.bots.registry import WorkloadRegistry
 from army.bots.roster import RosterEntry, roster, summarise
 from army.bots.schedule import first_wake
@@ -83,6 +84,7 @@ def _fleet(config: Config) -> tuple[Store, BotStore, BotSupervisor]:
         messages=messages,
         approvals=ApprovalStore(bots, owner_broker(bots), messages=messages),
         budgets=BudgetStore(bots),
+        reactions=ReactionStore(bots),
     )
     return store, bots, supervisor
 
@@ -611,6 +613,7 @@ def cmd_serve(config: Config, args: argparse.Namespace) -> int:
         budgets=budgets,
         workspace=Workspace(bots),
         wheels=WheelStore(bots),
+        reactions=ReactionStore(bots),
     )
     server = serve(site, host=args.host, port=args.port)
     # The link carries the token so it can be opened on a phone. It is also the

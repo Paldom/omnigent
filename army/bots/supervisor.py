@@ -29,6 +29,7 @@ from army.bots.isolation import sandbox_for
 from army.bots.messages import MessageKind, MessageStore
 from army.bots.model import Bot, BotStatus, IllegalBotMove, RunOutcome, WakeKind
 from army.bots.precondition import PreconditionRegistry, UnknownPrecondition
+from army.bots.reactions import ReactionStore, briefing
 from army.bots.registry import WorkloadRefused, WorkloadRegistry
 from army.bots.schedule import Wake, next_wake
 from army.bots.store import BotStore
@@ -127,6 +128,7 @@ class BotSupervisor(Supervisor):
         messages: MessageStore | None = None,
         approvals: ApprovalStore | None = None,
         budgets: BudgetStore | None = None,
+        reactions: ReactionStore | None = None,
     ) -> None:
         super().__init__(
             store,
@@ -150,6 +152,10 @@ class BotSupervisor(Supervisor):
         # anything that can spawn, which is why `carve` refuses an
         # unbudgeted parent.
         self.budgets = budgets
+        # Acknowledgement that authorises nothing. Optional because a fleet
+        # works without it; when present, marks reach the bot in its brief
+        # rather than living only in a UI.
+        self.reactions = reactions
         #: Bots already reported as stalled, so the alarm fires on the change
         #: rather than on every tick.
         self._alarmed: set[str] = set()
@@ -381,7 +387,12 @@ class BotSupervisor(Supervisor):
         # iteration's payload, so the body reads it before the work item. A
         # message that only reaches the channel is a message read a week later
         # as history.
-        item = {**item, "said": self._take_messages(bot, now=now)}
+        # Marks travel with what was said, in the same list: to the body it is
+        # all "what a person told me since last time", and a reaction that only
+        # reached the UI would be a nicer way of doing nothing.
+        said = self._take_messages(bot, now=now)
+        marks = self._take_reactions(bot, now=now)
+        item = {**item, "said": said + ([marks] if marks else [])}
         run = Run.new(
             workload.name,
             item,
@@ -1048,6 +1059,31 @@ class BotSupervisor(Supervisor):
             said.append(delivery.message.body)
             self.messages.ack(delivery.message.id, bot.address)
         return said
+
+    def _take_reactions(self, bot: Bot, *, now: int) -> str:
+        """
+        What people marked on this bot's work, and what that does not mean.
+
+        The boundary rides in the same paragraph as the news. A bot told
+        somebody marked its report *useful*, and left to draw its own
+        conclusion, will draw the wrong one — on the iteration where it
+        matters, because that is the iteration somebody was reading closely
+        enough to react to.
+
+        :param bot: The bot about to run.
+        :param now: Epoch seconds.
+        :returns: A markdown section, or ``""``.
+        """
+        if self.reactions is None:
+            return ""
+        unseen = self.reactions.take_unseen(bot.id, now=now)
+        if not unseen:
+            return ""
+        bodies = {
+            message.id: message.body
+            for message in (self.messages.channel(bot.id, limit=200) if self.messages else [])
+        }
+        return briefing(unseen, bodies)
 
     def _steer_live_runs(self, *, now: int) -> None:
         """

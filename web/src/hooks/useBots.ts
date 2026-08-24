@@ -17,6 +17,7 @@ import {
   getScreen,
   listBots,
   sayToBot,
+  reactToMessage,
   setWheel,
   signOwnerRequest,
   type BotDetail,
@@ -168,6 +169,22 @@ export function useScreen(slug: string | null, open: boolean) {
     enabled: Boolean(slug) && open,
     refetchInterval: 2_000,
     retry: false,
+  });
+}
+
+/**
+ * Mark a message, or take the mark back.
+ *
+ * Only the bot's own detail is refetched: a mark changes nothing on the
+ * roster, which is the point of it.
+ */
+export function useReact(slug: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: reactToMessage,
+    onSuccess: () => {
+      if (slug) void queryClient.invalidateQueries({ queryKey: botKey(slug) });
+    },
   });
 }
 
