@@ -626,7 +626,7 @@ function ChannelLine({
       <p className="m-0 mt-0.5 whitespace-pre-wrap">{message.body}</p>
 
       {markable && (
-        <div className="mt-1 flex items-center gap-1">
+        <div data-testid="marks" className="mt-1 flex items-center gap-1">
           {MARKS.map((mark) => {
             const on = message.marks.includes(mark.value);
             return (
