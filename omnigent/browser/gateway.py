@@ -458,12 +458,12 @@ class BrowserGateway:
         """
         entry = self._profiles.get(_canonical(profile))
         if entry is None:
-            if not fresh:
-                return {"ok": False, "error": "that browser is not open"}
-            try:
-                entry = await self._profile_for(profile)
-            except BrowserUnavailable as exc:
-                return {"ok": False, "error": str(exc)}
+            # Never launches. Looking at a bot is not asking it to browse, and
+            # ``fresh`` used to mean "start one if there isn't one" — so opening
+            # the panel on an idle bot spent 300MB on a blank page and, at a
+            # resident cap of two, could evict the browser a working bot was
+            # in the middle of using.
+            return {"ok": False, "error": "that browser is not open"}
         if fresh:
             async with entry.lock:
                 await self._capture(entry)

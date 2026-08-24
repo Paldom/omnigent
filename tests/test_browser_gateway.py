@@ -178,13 +178,21 @@ async def test_the_frame_a_person_watches_is_the_page_the_agent_drove(
     assert frame["dataUrl"].startswith("data:image/jpeg;base64,")
 
 
-async def test_a_profile_that_was_never_opened_says_so(tmp_path: Path) -> None:
-    """Opening the panel must not launch a browser nobody asked for."""
+@pytest.mark.parametrize("fresh", [False, True])
+async def test_a_profile_that_was_never_opened_says_so(tmp_path: Path, fresh: bool) -> None:
+    """Opening the panel must not launch a browser nobody asked for.
+
+    Including with ``fresh``, which is what the panel actually passes. It used
+    to mean "start one if there isn't one", so viewing an idle bot spent 300MB
+    on a blank page — and at a resident cap of two, evicted the browser a
+    working bot was using.
+    """
     gateway = BrowserGateway(root=tmp_path)
-    frame = await gateway.frame("never-opened", fresh=False)
+    frame = await gateway.frame("never-opened", fresh=fresh)
 
     assert frame["ok"] is False
     assert "not open" in frame["error"]
+    assert gateway.resident() == []
 
 
 async def test_one_bot_per_profile_directory(gateway: BrowserGateway, tmp_path: Path) -> None:
