@@ -35,7 +35,7 @@ from army.bots.roster import RosterEntry, roster, summarise
 from army.bots.schedule import first_wake
 from army.bots.spawn import SpawnRefused
 from army.bots.store import BotStore
-from army.bots.wheel import REFUSAL
+from army.bots.wheel import REFUSAL, canonical_profile
 from army.bots.workspace import Workspace
 from army.gates import GateRefused, digest
 from army.store import ConcurrentTransition, Store
@@ -159,21 +159,6 @@ _DISC: dict[DerivedStatus, str] = {
     DerivedStatus.WAITING_RESOURCE: "hold",
     DerivedStatus.BACKING_OFF: "hold",
 }
-
-
-def _bare_profile(profile: str) -> str:
-    """
-    A browser profile without its ``persist:`` prefix.
-
-    Both spellings name one browser: definitions write the Electron partition
-    form, and a hand-written one often writes the bare slug. Comparing them
-    literally means a held wheel silently refuses nothing — which is the same
-    shape as no wheel at all, and reads as a bot ignoring the handoff.
-
-    :param profile: Either spelling.
-    :returns: The bare name.
-    """
-    return profile.removeprefix("persist:").strip()
 
 
 class BotsSite:
@@ -655,10 +640,15 @@ class BotsSite:
         held = self.wheels.all_held(now=now)
         if not held:
             return ""
-        wanted = _bare_profile(profile)
+        wanted = canonical_profile(profile)
+        if not wanted:
+            # An unusable name cannot be matched against anything, and the
+            # gateway refuses to open it either — so there is no browser to
+            # contend for and nothing to refuse.
+            return ""
         for bot_id in held:
             bot = self.bots.get(bot_id)
-            if bot is not None and _bare_profile(bot.browser_profile or "") == wanted:
+            if bot is not None and canonical_profile(bot.browser_profile or "") == wanted:
                 return REFUSAL
         return ""
 

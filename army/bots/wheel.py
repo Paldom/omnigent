@@ -24,6 +24,7 @@ would be a much weaker thing wearing the same name.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 
@@ -52,6 +53,32 @@ REFUSAL = (
     "back. Wait, say in your reply that you were interrupted, and do not "
     "retry in a loop."
 )
+
+
+#: What a browser profile may be called.
+#:
+#: **This must stay identical to** ``omnigent.browser.gateway._PROFILE_NAME``
+#: and ``_canonical``. It is duplicated rather than shared because the server
+#: imports nothing from this package — and the copies are pinned together by
+#: ``tests/army/bots/test_wheel.py``, which asserts both answer the same for
+#: the same inputs. Two canonicalisers that disagree is not a tidiness problem:
+#: the gateway keyed browsers one way and this keyed wheel-holds another, so a
+#: person could take the wheel and the bot would keep driving the page they
+#: were typing into, with nothing logged.
+_PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+
+
+def canonical_profile(profile: str) -> str:
+    """
+    One canonical name for a browser profile, or ``""`` when unusable.
+
+    :param profile: The profile name, with or without its ``persist:`` prefix.
+    :returns: The canonical name, or ``""``.
+    """
+    bare = profile.removeprefix("persist:").strip().casefold()
+    if ".." in bare or not _PROFILE_NAME.fullmatch(bare):
+        return ""
+    return bare
 
 
 @dataclass(frozen=True)

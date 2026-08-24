@@ -505,6 +505,7 @@ async def test_a_labelled_session_goes_to_the_gateway_not_the_desktop(
             return {"ok": True, "url": args.get("url"), "title": "Fee Schedule"}
 
     monkeypatch.setattr("omnigent.browser.gateway", lambda: _FakeGateway())
+    monkeypatch.setattr("omnigent.browser.authority.control_token", lambda: "a-control-secret")
 
     agent = await create_test_agent(client, "test-browser-gateway-route")
     resp = await client.post(
@@ -513,6 +514,7 @@ async def test_a_labelled_session_goes_to_the_gateway_not_the_desktop(
             "agent_id": agent["id"],
             "labels": {"omnigent.browser.profile": "bot-kraken-fee-watch"},
         },
+        headers={"X-Omnigent-Control": "a-control-secret"},
     )
     assert resp.status_code == 201, resp.text
     session_id = resp.json()["id"]
@@ -560,3 +562,70 @@ async def test_an_unlabelled_session_still_parks_for_the_desktop(
     )
     resp = await request_task
     assert resp.json() == {"final_url": "https://example.com"}
+
+
+async def test_a_session_cannot_name_a_browser_without_the_control_secret(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The label names an identity, so anyone who may set it may become one.
+
+    A bot's body is an ordinary session with a shell in it. Left ungated, a bot
+    that knew another bot's slug could open a session labelled with that bot's
+    profile and read its logged-in pages — with the browser's own trail
+    attributing the whole thing to the victim.
+    """
+    monkeypatch.setattr("omnigent.browser.authority.control_token", lambda: "a-control-secret")
+    agent = await create_test_agent(client, "test-browser-label-gate")
+
+    resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "labels": {"omnigent.browser.profile": "persist:bot-payroll"},
+        },
+    )
+
+    assert resp.status_code == 403, resp.text
+    assert "control plane" in resp.text
+
+
+async def test_the_label_cannot_be_added_after_the_session_exists(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gating creation alone would mean opening a plain session and labelling it."""
+    monkeypatch.setattr("omnigent.browser.authority.control_token", lambda: "a-control-secret")
+    agent = await create_test_agent(client, "test-browser-label-gate-update")
+    session_id = await _create_session(client, agent["id"])
+
+    resp = await client.patch(
+        f"/v1/sessions/{session_id}",
+        json={"labels": {"omnigent.browser.profile": "persist:bot-payroll"}},
+    )
+
+    assert resp.status_code in (403, 405), resp.text
+
+
+async def test_no_control_plane_means_nobody_may_name_a_browser(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "No secret configured" reads as nobody, not everybody.
+
+    Without Bot mode there is nothing that legitimately sets this label, so an
+    absent token must not be an open door.
+    """
+    monkeypatch.setattr("omnigent.browser.authority.control_token", lambda: None)
+    agent = await create_test_agent(client, "test-browser-label-no-plane")
+
+    resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "labels": {"omnigent.browser.profile": "persist:bot-anything"},
+        },
+        headers={"X-Omnigent-Control": "guessed"},
+    )
+
+    assert resp.status_code == 403, resp.text

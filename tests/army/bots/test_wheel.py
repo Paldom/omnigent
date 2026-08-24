@@ -156,3 +156,36 @@ def test_either_spelling_of_a_profile_still_refuses(
     site.wheel({"bot": ["watcher"], "action": ["take"]}, now=NOW)
 
     assert site.wheel_for_profile(asked_as, now=NOW) == REFUSAL
+
+
+def test_the_wheel_and_the_gateway_agree_on_what_a_profile_is_called() -> None:
+    """Two canonicalisers that disagree is a wheel that refuses nothing.
+
+    The gateway keys browsers one way and the wheel keyed holds another, so
+    ``persist:acme/prod`` and ``persist:acme_prod`` were one Chromium and two
+    identities: a person took the wheel of one and the other kept driving the
+    page they were typing into, with nothing logged.
+
+    The rule is duplicated because the server imports nothing from this
+    package. This is what keeps the copies honest.
+    """
+    from army.bots.wheel import canonical_profile
+    from omnigent.browser.gateway import _canonical
+
+    for name in (
+        "persist:bot-kraken-fee-watch",
+        "bot-kraken-fee-watch",
+        "Bot-A",
+        "bot-a",
+        "acme/prod",
+        "acme_prod",
+        "acme prod",
+        "acme:prod",
+        "persist:..",
+        "..",
+        "",
+        "   ",
+        "bot-а",  # Cyrillic a — a lookalike identity
+        "x" * 200,
+    ):
+        assert canonical_profile(name) == _canonical(name), name

@@ -111,15 +111,56 @@ async def test_a_snapshot_never_carries_a_password(gateway: BrowserGateway) -> N
     assert "- password" in snapshot["tree"], "naming the field is fine; echoing it is not"
 
 
-async def test_typing_a_secret_is_not_echoed_back(gateway: BrowserGateway) -> None:
-    """``type`` confirms it acted without repeating what it typed."""
+async def test_a_bot_cannot_type_into_a_password_field(gateway: BrowserGateway) -> None:
+    """The one place "ask a person to sign in" stops being an instruction.
+
+    A brief can be argued with by the page it is reading: text on the page
+    claiming the operator already approved, or that this is a test environment,
+    is exactly the shape of a successful prompt injection. A refusal in the
+    executor is not persuadable.
+    """
     await gateway.perform("test", "navigate", {"url": _url(PAGE)})
     snapshot = await gateway.perform("test", "snapshot", {})
     field = _ref(snapshot["tree"], "", kind="password")
 
-    result = await gateway.perform("test", "type", {"ref": field, "text": "s3cret"})
-    assert result["ok"] is True
+    result = await gateway.perform(
+        "test", "type", {"ref": field, "snapshot_id": snapshot["snapshot_id"], "text": "s3cret"}
+    )
+
+    assert result["ok"] is False
+    assert "password field" in result["error"]
     assert "s3cret" not in str(result)
+
+
+async def test_a_field_named_like_a_secret_is_refused_too(gateway: BrowserGateway) -> None:
+    """``type="text"`` on something called ``otp`` is still a credential."""
+    page = '<html><body><input type="text" name="otp_code" id="otp_code"></body></html>'
+    await gateway.perform("test", "navigate", {"url": _url(page)})
+    snapshot = await gateway.perform("test", "snapshot", {})
+    field = _ref(snapshot["tree"], "", kind="text")
+
+    result = await gateway.perform(
+        "test", "type", {"ref": field, "snapshot_id": snapshot["snapshot_id"], "text": "123456"}
+    )
+
+    assert result["ok"] is False
+    assert "123456" not in str(result)
+
+
+async def test_an_ordinary_field_still_accepts_text_without_echoing_it(
+    gateway: BrowserGateway,
+) -> None:
+    """The refusal must be narrow — a search box is not a credential."""
+    await gateway.perform("test", "navigate", {"url": _url(PAGE)})
+    snapshot = await gateway.perform("test", "snapshot", {})
+    field = _ref(snapshot["tree"], "Search fees")
+
+    result = await gateway.perform(
+        "test", "type", {"ref": field, "snapshot_id": snapshot["snapshot_id"], "text": "tier 1"}
+    )
+
+    assert result["ok"] is True
+    assert "tier 1" not in str(result), "a tool result is transcript"
 
 
 async def test_screenshot_returns_a_path_not_sixty_kilobytes_of_base64(
@@ -228,7 +269,9 @@ async def test_navigating_invalidates_every_ref(gateway: BrowserGateway) -> None
     ref = _ref(snapshot["tree"], "Reject All")
     await gateway.perform("test", "navigate", {"url": _url("<html><body>gone</body></html>")})
 
-    result = await gateway.perform("test", "click", {"ref": ref})
+    result = await gateway.perform(
+        "test", "click", {"ref": ref, "snapshot_id": snapshot["snapshot_id"]}
+    )
 
     assert result["ok"] is False
     assert "snapshot" in result["error"]
@@ -238,9 +281,13 @@ async def test_navigating_invalidates_every_ref(gateway: BrowserGateway) -> None
 async def test_a_ref_cannot_smuggle_a_selector(gateway: BrowserGateway) -> None:
     """The ref is concatenated into a selector, so it must be digits."""
     await gateway.perform("test", "navigate", {"url": _url(PAGE)})
-    await gateway.perform("test", "snapshot", {})
+    snapshot = await gateway.perform("test", "snapshot", {})
 
-    result = await gateway.perform("test", "click", {"ref": '1"], button[aria-label="Reject All'})
+    result = await gateway.perform(
+        "test",
+        "click",
+        {"ref": '1"], button[aria-label="Reject All', "snapshot_id": snapshot["snapshot_id"]},
+    )
 
     assert result["ok"] is False
     assert "integer" in result["error"]
@@ -262,12 +309,25 @@ async def test_one_profile_under_two_spellings_is_one_browser(gateway: BrowserGa
     assert "persist:bot-kraken" not in gateway.resident(), "one entry, not two"
 
 
-async def test_a_profile_name_cannot_choose_the_directory(gateway: BrowserGateway) -> None:
-    """The name arrives from a session label and becomes a path."""
-    await gateway.perform("../../../etc/evil", "navigate", {"url": _url(PAGE)})
+@pytest.mark.parametrize(
+    "name", ["../../../etc/evil", "acme/prod", "acme prod", "acme:prod", "..", "bot-\u0430"]
+)
+async def test_an_unusable_profile_name_is_refused_not_repaired(
+    gateway: BrowserGateway, name: str
+) -> None:
+    """Sanitising a name silently merges identities.
 
-    opened = [name for name in gateway.resident() if name != "test"]
-    assert opened == ["_.._.._etc_evil"]
+    The first version replaced anything outside a small alphabet with ``_``, so
+    ``acme/prod``, ``acme prod`` and ``acme_prod`` were one browser sharing one
+    cookie jar — three identities, one session, and an audit trail that cannot
+    say which of them did a thing. A Cyrillic lookalike did the same trick
+    without any punctuation at all.
+    """
+    result = await gateway.perform(name, "navigate", {"url": _url(PAGE)})
+
+    assert result["ok"] is False
+    assert "not a usable browser profile name" in result["error"]
+    assert [entry for entry in gateway.resident() if entry != "test"] == []
 
 
 async def test_the_trail_records_what_the_browser_was_made_to_do(
@@ -276,7 +336,11 @@ async def test_the_trail_records_what_the_browser_was_made_to_do(
     """A frame says where a browser is. Watching a bot work means seeing steps."""
     await gateway.perform("test", "navigate", {"url": _url(PAGE)})
     snapshot = await gateway.perform("test", "snapshot", {})
-    await gateway.perform("test", "click", {"ref": _ref(snapshot["tree"], "Reject All")})
+    await gateway.perform(
+        "test",
+        "click",
+        {"ref": _ref(snapshot["tree"], "Reject All"), "snapshot_id": snapshot["snapshot_id"]},
+    )
 
     trail = gateway.trail("test")
     assert [step["action"] for step in trail] == ["navigate", "snapshot", "click"]
@@ -288,7 +352,9 @@ async def test_the_trail_never_carries_typed_text(gateway: BrowserGateway) -> No
     await gateway.perform("test", "navigate", {"url": _url(PAGE)})
     snapshot = await gateway.perform("test", "snapshot", {})
     field = _ref(snapshot["tree"], "", kind="password")
-    await gateway.perform("test", "type", {"ref": field, "text": "s3cret"})
+    await gateway.perform(
+        "test", "type", {"ref": field, "snapshot_id": snapshot["snapshot_id"], "text": "s3cret"}
+    )
 
     assert "s3cret" not in str(gateway.trail("test"))
     assert "withheld" in gateway.trail("test")[-1]["target"]
@@ -297,7 +363,8 @@ async def test_the_trail_never_carries_typed_text(gateway: BrowserGateway) -> No
 async def test_a_failed_action_is_recorded_not_dropped(gateway: BrowserGateway) -> None:
     """A refused or wrong action is only explicable if the attempt was written down."""
     await gateway.perform("test", "navigate", {"url": _url(PAGE)})
-    await gateway.perform("test", "click", {"selector": "#nothing-here"})
+    snapshot = await gateway.perform("test", "snapshot", {})
+    await gateway.perform("test", "click", {"ref": 9999, "snapshot_id": snapshot["snapshot_id"]})
 
     last = gateway.trail("test")[-1]
     assert last["ok"] is False
@@ -311,3 +378,298 @@ async def test_the_trail_is_bounded(gateway: BrowserGateway) -> None:
         await gateway.perform("test", "snapshot", {})
 
     assert len(gateway.trail("test")) == TRAIL_LENGTH
+
+
+# ── what a hostile page, or an agent talked into one, must not reach ──
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        # The profile root holds every other bot's cookie database. This is a
+        # complete cross-bot credential theft wearing the shape of reading a page.
+        ("file:///etc/passwd", "not reachable"),
+        ("file:///Users/x/.omnigent/browser-profiles/bot-b/Default/Cookies", "not reachable"),
+        # The bot's browser runs on the server, so loopback is the control
+        # plane — the thing holding the fleet token and every open approval.
+        ("http://127.0.0.1:6769/api/bots", "this machine"),
+        ("http://localhost:6767/v1/sessions", "this machine"),
+        # Cloud metadata: instance credentials over plain HTTP.
+        ("http://169.254.169.254/latest/meta-data/iam/", "private network"),
+        ("http://192.168.1.1/", "private network"),
+        ("chrome://settings/passwords", "not reachable"),
+    ],
+)
+async def test_a_bot_browser_refuses_to_leave_the_web(
+    gateway: BrowserGateway, url: str, expected: str
+) -> None:
+    """Navigation is not a filesystem or an intranet scanner."""
+    result = await gateway.perform("test", "navigate", {"url": url})
+
+    assert result["ok"] is False
+    assert expected in result["error"]
+
+
+async def test_a_raw_selector_is_refused(gateway: BrowserGateway) -> None:
+    """A selector walks past every control the ref path provides.
+
+    `input[type=password]` picks exactly the field the brief forbids, and
+    Playwright's `>>` and `xpath=` reach into frames the snapshot never showed
+    — none of it visible in what the operator can read.
+    """
+    await gateway.perform("test", "navigate", {"url": _url(PAGE)})
+    await gateway.perform("test", "snapshot", {})
+
+    result = await gateway.perform(
+        "test", "type", {"selector": "input[type=password]", "text": "hunter2"}
+    )
+
+    assert result["ok"] is False
+    assert "browser_snapshot" in result["error"]
+    assert "hunter2" not in str(result)
+
+
+async def test_the_page_cannot_move_a_ref_onto_something_else(
+    gateway: BrowserGateway,
+) -> None:
+    """The ref lives in the page's own DOM, so the page can relocate it.
+
+    A snapshot names ref N as a harmless button; page script then moves the
+    attribute onto "Confirm transfer". Every other check passes — the
+    snapshot_id is current, the ref is a digit — and the click lands on the
+    attacker's element while the transcript still says it was the harmless one.
+    """
+    hostile = """
+    <html><body>
+      <button id="safe" aria-label="Read more">Read more</button>
+      <button id="danger" aria-label="Confirm transfer">Confirm transfer</button>
+    </body></html>
+    """
+    await gateway.perform("test", "navigate", {"url": _url(hostile)})
+    snapshot = await gateway.perform("test", "snapshot", {})
+    ref = _ref(snapshot["tree"], "Read more")
+
+    # The page, reacting to having been snapshotted.
+    await gateway._profiles["test"].page.evaluate(
+        """() => {
+            const safe = document.querySelector('#safe');
+            const danger = document.querySelector('#danger');
+            danger.setAttribute('data-omni-ref', safe.getAttribute('data-omni-ref'));
+            safe.removeAttribute('data-omni-ref');
+        }"""
+    )
+
+    result = await gateway.perform(
+        "test", "click", {"ref": ref, "snapshot_id": snapshot["snapshot_id"]}
+    )
+
+    assert result["ok"] is False
+    assert "moved it" in result["error"]
+    assert "Confirm transfer" in result["error"]
+
+
+async def test_the_trail_does_not_record_an_oauth_code(gateway: BrowserGateway) -> None:
+    """A callback URL after a human signs in is a live credential."""
+    await gateway.perform(
+        "test",
+        "navigate",
+        {"url": "https://app.example/callback?code=SplxlOBeZQQYbYS6WxSbIA&state=xyz"},
+    )
+
+    trail = str(gateway.trail("test"))
+    assert "SplxlOBeZQQYbYS6WxSbIA" not in trail
+    assert "withheld" in trail
+
+
+async def test_screenshots_are_not_readable_by_another_bot(gateway: BrowserGateway) -> None:
+    """A picture of a logged-in page is the session. It lives under its own profile."""
+    await gateway.perform("test", "navigate", {"url": _url(PAGE)})
+    result = await gateway.perform("test", "screenshot", {})
+
+    assert Path(result["path"]).parent.parent.name == "test"
+    assert "_shots" not in result["path"], "one shared folder is every bot's sessions"
+
+
+async def test_a_page_cannot_hide_a_password_field_by_patching_its_own_dom(
+    gateway: BrowserGateway,
+) -> None:
+    """The check must not run where the page can rewrite it.
+
+    `page.evaluate` executes in the page's own JavaScript world, so a single
+    line — `Element.prototype.getAttribute = () => 'text'` — makes every
+    password box report as a text box. Playwright's locator API answers from an
+    isolated world instead, which is the whole reason to use it here.
+    """
+    hostile = """
+    <html><body>
+      <input id="p" type="password" name="password">
+      <script>
+        const real = Element.prototype.getAttribute;
+        Element.prototype.getAttribute = function (name) {
+          if (name === 'type') return 'text';
+          if (name === 'name') return 'nickname';
+          return real.call(this, name);
+        };
+      </script>
+    </body></html>
+    """
+    await gateway.perform("test", "navigate", {"url": _url(hostile)})
+    snapshot = await gateway.perform("test", "snapshot", {})
+    ref = int(snapshot["tree"].splitlines()[0].rsplit("[ref=", 1)[1].rstrip("]"))
+
+    result = await gateway.perform(
+        "test", "type", {"ref": ref, "snapshot_id": snapshot["snapshot_id"], "text": "hunter2"}
+    )
+
+    assert result["ok"] is False
+    assert "hunter2" not in str(result)
+
+
+async def test_a_one_time_code_field_is_a_credential(gateway: BrowserGateway) -> None:
+    """2FA prompts are `type="text"` because that is what phone keyboards want.
+
+    Filtering on `type="password"` alone misses every one of them — which is
+    precisely the field an injected agent would be steered towards.
+    """
+    page = (
+        '<html><body><input type="text" inputmode="numeric" '
+        'autocomplete="one-time-code" name="code"></body></html>'
+    )
+    await gateway.perform("test", "navigate", {"url": _url(page)})
+    snapshot = await gateway.perform("test", "snapshot", {})
+    ref = int(snapshot["tree"].splitlines()[0].rsplit("[ref=", 1)[1].rstrip("]"))
+
+    result = await gateway.perform(
+        "test", "type", {"ref": ref, "snapshot_id": snapshot["snapshot_id"], "text": "483920"}
+    )
+
+    assert result["ok"] is False
+    assert "483920" not in str(result)
+
+
+async def test_a_page_that_moves_on_its_own_invalidates_its_refs(
+    gateway: BrowserGateway,
+) -> None:
+    """Refs died only on the `navigate` action, not on how pages actually move.
+
+    A click-through, a 302 and a meta refresh all left the snapshot id current
+    and the stamps sitting on a document that no longer exists. Driven here by
+    navigating the page underneath the gateway, so only the framenavigated
+    listener can clear anything — the `navigate` action clears refs itself and
+    would prove nothing.
+    """
+    await gateway.perform("test", "navigate", {"url": _url(PAGE)})
+    snapshot = await gateway.perform("test", "snapshot", {})
+    ref = _ref(snapshot["tree"], "Reject All")
+
+    await gateway._profiles["test"].page.goto(
+        _url("<html><body><h1>somewhere else</h1></body></html>")
+    )
+
+    result = await gateway.perform(
+        "test", "click", {"ref": ref, "snapshot_id": snapshot["snapshot_id"]}
+    )
+    assert result["ok"] is False
+    assert "snapshot" in result["error"]
+
+
+async def test_two_snapshots_never_share_an_id(gateway: BrowserGateway) -> None:
+    """A counter restarts at one when a profile relaunches.
+
+    So `snap_1` taken before an eviction matched `snap_1` taken after it — the
+    staleness check passing across a different browser and a different page.
+    """
+    await gateway.perform("test", "navigate", {"url": _url(PAGE)})
+    first = (await gateway.perform("test", "snapshot", {}))["snapshot_id"]
+    await gateway.close("test")
+    await gateway.perform("test", "navigate", {"url": _url(PAGE)})
+    second = (await gateway.perform("test", "snapshot", {}))["snapshot_id"]
+
+    assert first != second
+
+
+async def test_eviction_does_not_close_a_browser_that_is_in_use(tmp_path: Path) -> None:
+    """A third bot waking up must not close a page another bot is mid-click on.
+
+    It used to: eviction picked the least recently used and closed it without
+    regard for the lock, so the victim got `Target closed` with no hint its
+    browser had been taken, and its next action silently relaunched a blank
+    page with the trail and the tab gone.
+    """
+    gateway = BrowserGateway(root=tmp_path, max_resident=1)
+    try:
+        busy = await gateway._profile_for("busy")
+    except BrowserUnavailable as exc:
+        pytest.skip(f"no browser available: {exc}")
+
+    async with busy.lock:
+        with pytest.raises(BrowserUnavailable, match="busy"):
+            await gateway._profile_for("newcomer")
+        assert "busy" in gateway.resident(), "the in-use browser survived"
+
+    await gateway.shutdown()
+
+
+# ── the wheel, as an interlock rather than a courtesy ────────────
+
+
+async def test_a_held_browser_refuses_the_bot(gateway: BrowserGateway) -> None:
+    """The refusal happens next to the browser, not over HTTP before it."""
+    await gateway.perform("test", "navigate", {"url": _url(PAGE)})
+    gateway.hold("test", seconds=900)
+
+    result = await gateway.perform("test", "snapshot", {})
+
+    assert result["ok"] is False
+    assert "taken the wheel" in result["error"]
+    assert "not queued" in result["error"]
+
+
+async def test_a_read_is_refused_too_while_a_person_drives(gateway: BrowserGateway) -> None:
+    """A snapshot taken while somebody types a password transcribes it.
+
+    Reads are the dangerous direction here, not writes — which is why the old
+    version's fail-open-on-error was backwards: the moment the control plane
+    was unreachable was the moment the wheel stopped protecting anything.
+    """
+    await gateway.perform("test", "navigate", {"url": _url(PAGE)})
+    gateway.hold("test", seconds=900)
+
+    for action in ("snapshot", "screenshot", "navigate"):
+        result = await gateway.perform("test", action, {"url": _url(PAGE)})
+        assert result["ok"] is False, action
+
+
+async def test_a_hold_can_be_taken_before_the_browser_exists(gateway: BrowserGateway) -> None:
+    """Somebody takes the wheel of a bot that has not browsed yet."""
+    gateway.hold("not-open-yet", seconds=900)
+    assert gateway.driven_by_a_person("not-open-yet") is True
+
+
+async def test_handing_back_lets_the_bot_drive_again(gateway: BrowserGateway) -> None:
+    await gateway.perform("test", "navigate", {"url": _url(PAGE)})
+    gateway.hold("test", seconds=900)
+    gateway.release("test")
+
+    assert (await gateway.perform("test", "snapshot", {}))["ok"] is True
+
+
+async def test_a_closed_laptop_is_not_a_stuck_browser(gateway: BrowserGateway) -> None:
+    """A time, not a flag: a control plane that dies mid-hold must not brick it."""
+    await gateway.perform("test", "navigate", {"url": _url(PAGE)})
+    gateway.hold("test", seconds=0)
+
+    assert gateway.driven_by_a_person("test") is False
+    assert (await gateway.perform("test", "snapshot", {}))["ok"] is True
+
+
+async def test_the_refusal_is_recorded_so_the_gap_is_explicable(
+    gateway: BrowserGateway,
+) -> None:
+    """A refused action is otherwise a mysterious hole in an iteration."""
+    await gateway.perform("test", "navigate", {"url": _url(PAGE)})
+    gateway.hold("test", seconds=900)
+    await gateway.perform("test", "snapshot", {})
+
+    assert gateway.trail("test")[-1]["ok"] is False
+    assert "wheel" in gateway.trail("test")[-1]["error"]

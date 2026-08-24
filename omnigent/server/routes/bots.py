@@ -62,6 +62,13 @@ def _token() -> str | None:
     return secret or None
 
 
+#: How long a person's hold on a browser lasts before it falls back to the bot.
+#: Mirrors ``army.bots.wheel.DEFAULT_LEASE_S``; the ledger is the record and
+#: this is the enforcement, so they are set together or the browser and the
+#: roster disagree about who is driving.
+WHEEL_LEASE_S = 900.0
+
+
 async def wheel_refusal_for_profile(profile: str) -> str:
     """
     Whether a person has taken the browser this action would drive.
@@ -233,15 +240,29 @@ def create_bots_router(*, auth_provider: AuthProvider | None = None) -> APIRoute
         """
         require_user(request, auth_provider)
         body = await request.json()
-        return await _forward(
+        slug = str(body.get("bot", ""))
+        take = bool(body.get("take"))
+        answer = await _forward(
             "POST",
             "/wheel",
             data={
-                "bot": str(body.get("bot", "")),
-                "action": "take" if body.get("take") else "release",
+                "bot": slug,
+                "action": "take" if take else "release",
                 "why": str(body.get("why", "")),
             },
         )
+        # Tell the browser itself, not only the ledger. The gateway is what
+        # actually refuses a bot's action, and it must know before the next one
+        # arrives — asking the control plane per action was a round trip that
+        # failed open and left a window between the answer and the click.
+        if answer.get("ok"):
+            from omnigent.browser import gateway
+
+            if take:
+                gateway().hold(f"bot-{slug}", seconds=WHEEL_LEASE_S)
+            else:
+                gateway().release(f"bot-{slug}")
+        return answer
 
     @router.post("/bots/say")
     async def say(request: Request) -> dict[str, Any]:

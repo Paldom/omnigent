@@ -8389,6 +8389,43 @@ def _reject_reserved_cost_control_label_seed(labels: dict[str, str]) -> None:
         )
 
 
+def _reject_unauthorised_browser_profile(labels: dict[str, str] | None, request: Any) -> None:
+    """
+    Reject a browser-profile label from a caller that is not the control plane.
+
+    The label decides which Chromium — and so which cookie jar and which
+    logged-in identity — a session's ``browser_*`` actions reach. Left open,
+    anything able to create a session could name another bot's profile and act
+    as that bot, with the trail attributing it to the victim.
+
+    See :mod:`omnigent.browser.authority` for what this does and does not
+    protect against; it is not isolation, and the difference is written down
+    there rather than implied.
+
+    :param labels: The client-supplied labels, or ``None``.
+    :param request: The inbound request, for its headers.
+    :raises OmnigentError: 403 when the label is present without the secret.
+    """
+    from omnigent.browser.authority import (
+        BROWSER_PROFILE_LABEL,
+        CONTROL_HEADER,
+        may_set_browser_profile,
+    )
+
+    if not labels or BROWSER_PROFILE_LABEL not in labels:
+        return
+    supplied = None
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        supplied = headers.get(CONTROL_HEADER)
+    if not may_set_browser_profile(supplied):
+        raise OmnigentError(
+            f"label {BROWSER_PROFILE_LABEL!r} names the browser a session drives and "
+            "is set by the bot control plane, not by its callers",
+            code=ErrorCode.FORBIDDEN,
+        )
+
+
 def _reject_server_reserved_label_seed(labels: dict[str, str] | None) -> None:
     """
     Reject a client-supplied label map that touches server-internal keys.

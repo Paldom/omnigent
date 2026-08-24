@@ -40,7 +40,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import logging
+import re
+import secrets
+import socket
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -54,9 +58,12 @@ _logger = logging.getLogger(__name__)
 #: compromise is every bot's session, and an audit trail that cannot attribute.
 PROFILE_ROOT = Path.home() / ".omnigent" / "browser-profiles"
 
-#: Chromium instances resident at once. Deliberately small: the fleet cap is
-#: ten bots and a browser each would be three gigabytes of idle memory.
-MAX_RESIDENT = 2
+#: Chromium instances resident at once. Small, because a browser each for ten
+#: bots is three gigabytes of mostly idle memory — but deliberately *above* the
+#: supervisor's default of three concurrent runs. At two, three bots browsing
+#: meant every launch closed somebody's page, and the steady state of a nine-bot
+#: fleet was ping-pong rather than two stable identities.
+MAX_RESIDENT = 4
 
 #: How long a profile with nothing to do stays open. The profile survives on
 #: disk; only the process goes.
@@ -94,14 +101,9 @@ _INTERACTIVE = (
     '[contenteditable="true"],[onclick]'
 )
 
-#: Tags a ref list must never carry a value for. A snapshot that echoes what is
-#: typed into a password box puts the credential in the transcript, the run
-#: artifacts, and anything downstream that reads them.
-_SECRET_TYPES = ("password",)
-
-_SNAPSHOT_JS = """
+_SNAPSHOT_JS = r"""
 (args) => {
-  const [selector, refAttr, maxRefs, chars, secretTypes] = args;
+  const [selector, refAttr, maxRefs, chars] = args;
   const elements = [];
   let n = 0;
   for (const el of document.querySelectorAll(selector)) {
@@ -111,10 +113,14 @@ _SNAPSHOT_JS = """
     const ref = ++n;
     el.setAttribute(refAttr, String(ref));
     const type = el.getAttribute('type') || '';
-    const secret = secretTypes.includes(type.toLowerCase());
+    // Never el.value. Deciding "is this secret?" here would decide it in the
+    // page's own JS world, where `Array.prototype.includes`, `getAttribute`
+    // and `type` are all things the page can rewrite — so one line of hostile
+    // script turns a password box into a text box and the plaintext a human
+    // typed while holding the wheel lands in the transcript. A value is never
+    // needed to *name* a control, so it is never read.
     const label = (
       el.getAttribute('aria-label') ||
-      (secret ? '' : el.value) ||
       el.innerText ||
       el.getAttribute('placeholder') ||
       el.getAttribute('title') ||
@@ -124,12 +130,132 @@ _SNAPSHOT_JS = """
       ref,
       tag: el.tagName.toLowerCase(),
       type: type || undefined,
-      name: String(label).replace(/\\s+/g, ' ').trim().slice(0, 80),
+      name: String(label).replace(/\s+/g, ' ').trim().slice(0, 80),
     });
   }
   return {text: (document.body?.innerText ?? '').slice(0, chars), elements};
 }
 """
+
+
+#: Field names that mean "credential" whatever the input's ``type`` says. A
+#: one-time code is almost always ``type="text"`` with ``inputmode="numeric"``,
+#: because that is what makes phone keyboards behave — so filtering on
+#: ``type="password"`` alone misses every 2FA prompt ever shipped, which is
+#: exactly the field an injected agent would be steered towards.
+_SECRET_NAME = re.compile(
+    r"(?:^|[^a-z])("
+    r"password|passwd|passcode|"
+    r"otp|totp|mfa|2fa|one-?time-?code|verification-?code|auth-?code|"
+    r"current-password|new-password|"
+    r"cc-?num|card-?number|cvv|cvc|csc|"
+    r"pin|secret|token|api-?key|private-?key|seed-?phrase|mnemonic"
+    r")(?:[^a-z]|$)"
+)
+
+
+#: The only schemes a bot's browser may reach. ``file:`` is the one that
+#: matters: this process's own profile root holds every other bot's cookie
+#: database, and ``file:///…/browser-profiles/bot-b/Default/Cookies`` is a
+#: complete cross-bot credential theft through a tool that looks like reading a
+#: page. ``chrome:``, ``devtools:`` and ``blob:`` are excluded for the same
+#: reason — they address the browser rather than the web.
+#: ``data:`` is here and ``file:`` is not, and the difference is the point: a
+#: data URL is inert markup in an opaque origin with no cookies and no disk,
+#: while a file URL reads this machine. Rendering attacker-chosen HTML is
+#: something any navigation can do anyway.
+ALLOWED_SCHEMES = frozenset({"http", "https", "data"})
+
+#: Hostnames that resolve to this machine or its network neighbours. A bot's
+#: browser runs on the server, so ``http://127.0.0.1:6769`` is the *control
+#: plane* — the thing holding the fleet's token and every pending approval —
+#: and ``169.254.169.254`` is the cloud metadata service. Neither is a page.
+_BLOCKED_NETWORKS = (
+    "127.0.0.0/8",
+    "::1/128",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "169.254.0.0/16",
+    "fc00::/7",
+    "fe80::/10",
+    "0.0.0.0/8",
+)
+
+
+def _blocked_reason(url: str) -> str:
+    """
+    Why a bot's browser must not go here, or ``""``.
+
+    Checked on the resolved address rather than the name, because
+    ``evil.example`` is free to have an A record of ``127.0.0.1``. This is not
+    a complete SSRF defence — DNS can answer differently on the second lookup —
+    and it is applied to every request rather than only the first, which is
+    where a redirect would otherwise walk straight through.
+
+    :param url: Where the browser is being sent.
+    :returns: A refusal, or ``""``.
+    """
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    if scheme not in ALLOWED_SCHEMES:
+        return f"{parts.scheme or 'that'}: URLs are not reachable from a bot's browser"
+    if scheme == "data":
+        return ""
+    host = parts.hostname or ""
+    if not host:
+        return "that URL names no host"
+    if host.lower().endswith(".local") or host.lower() == "localhost":
+        return f"{host} is this machine, which is not a page"
+    for candidate in _resolved(host):
+        for network in _BLOCKED_NETWORKS:
+            if candidate in ipaddress.ip_network(network):
+                return (
+                    f"{host} resolves to {candidate}, which is this machine or its "
+                    "private network — a bot's browser reaches the public web only"
+                )
+    return ""
+
+
+def _resolved(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """
+    Every address a hostname answers to, plus the literal if it is one.
+
+    A name that will not resolve returns nothing, which reads as "not
+    obviously private" — the request will fail on its own merits.
+
+    :param host: The hostname or literal address.
+    :returns: The addresses.
+    """
+    try:
+        return [ipaddress.ip_address(host.strip("[]"))]
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return []
+    found = []
+    for info in infos:
+        try:
+            found.append(ipaddress.ip_address(info[4][0]))
+        except ValueError:
+            continue
+    return found
+
+
+#: What a bot is told when a person has the wheel. Written for an agent rather
+#: than a log: it says what happened, that waiting is correct, and that
+#: retrying is not. Mirrors ``army.bots.wheel.REFUSAL`` — the two are the same
+#: sentence on either side of a boundary neither may import across.
+WHEEL_REFUSAL = (
+    "A person has taken the wheel of this browser. Your action was refused, "
+    "not queued — the page may be somewhere else by the time they hand it "
+    "back. Wait, say in your reply that you were interrupted, and do not "
+    "retry in a loop."
+)
 
 
 class BrowserUnavailable(RuntimeError):
@@ -157,6 +283,13 @@ class _Profile:
     #: the DOM belong to a document that is gone.
     snapshot: int = 0
     snapshot_id: str | None = None
+    #: What each ref described when the snapshot named it, so an action can
+    #: check it is still acting on that. ``{ref: {"tag", "name"}}``.
+    refs: dict[int, dict[str, str]] = field(default_factory=dict)
+    #: When a person's hold on this browser lapses, on the monotonic clock.
+    #: ``0.0`` means the bot is driving. A time rather than a flag so a control
+    #: plane that dies mid-hold does not brick the browser forever.
+    driving_until: float = 0.0
     #: The last :data:`TRAIL_LENGTH` actions, so a person can see what the bot
     #: did rather than only where it ended up. Bounded because this lives for
     #: as long as the browser does and nothing prunes it.
@@ -174,6 +307,10 @@ class BrowserGateway:
         self.root = root or PROFILE_ROOT
         self.max_resident = max_resident
         self._profiles: dict[str, _Profile] = {}
+        #: Holds by profile, kept outside :attr:`_profiles` so taking the wheel
+        #: of a browser that is not open yet still refuses the bot when it
+        #: opens one.
+        self._held: dict[str, float] = {}
         self._playwright: Any = None
         self._lock = asyncio.Lock()
 
@@ -215,6 +352,11 @@ class BrowserGateway:
         # ``bot-x`` from the Screen panel are the same browser; keyed apart they
         # would be two Chromiums fighting over one profile's SingletonLock.
         name = _canonical(profile)
+        if not name:
+            raise BrowserUnavailable(
+                f"{profile!r} is not a usable browser profile name — "
+                "letters, digits, dot, dash and underscore only"
+            )
         existing = self._profiles.get(name)
         if existing is not None:
             existing.last_used = time.monotonic()
@@ -237,17 +379,51 @@ class BrowserGateway:
                 )
             except Exception as exc:
                 raise BrowserUnavailable(f"could not start a browser for {name}: {exc}") from exc
+            # Every request, not only the one the agent asked for. A redirect
+            # to file:// or to the loopback control plane is the same theft
+            # with one extra hop, and a subresource never passes through
+            # `navigate` at all.
+            await context.route("**/*", _guard_request)
             page = context.pages[0] if context.pages else await context.new_page()
             entry = _Profile(name=name, context=context, page=page, last_used=time.monotonic())
+
+            # Any navigation, not just the ones the agent asked for. Clearing
+            # refs only in the `navigate` action left them live through a
+            # click-through, a 302, a meta refresh and an SPA route change —
+            # every way a page actually moves — with the stamps sitting on
+            # detached or recycled nodes and the snapshot id still current.
+            def _forget_refs(frame: Any, _entry: _Profile = entry) -> None:
+                if frame is _entry.page.main_frame:
+                    _entry.snapshot_id = None
+                    _entry.refs = {}
+
+            page.on("framenavigated", _forget_refs)
             self._profiles[name] = entry
             _logger.info("browser gateway: opened profile %s", name)
             return entry
 
     async def _evict_if_full(self) -> None:
-        """Close the least recently used profile when at the cap."""
+        """
+        Make room for another browser, without taking one that is in use.
+
+        Eviction used to pick the least recently used and close it — with no
+        regard for ``entry.lock``. So a third bot waking up called
+        ``context.close()`` underneath another bot's in-flight click: that run
+        got ``Target closed`` with no hint its browser had been taken, its next
+        action silently relaunched a blank page, and the page state, the open
+        tab and the trail were gone. ``last_used`` is stamped *after* a
+        successful action, so a bot in the middle of a slow one looked idle and
+        was preferentially killed.
+
+        :raises BrowserUnavailable: When every resident browser is busy.
+        """
         while len(self._profiles) >= self.max_resident:
-            oldest = min(self._profiles.values(), key=lambda entry: entry.last_used)
-            await self.close(oldest.name)
+            idle = [entry for entry in self._profiles.values() if not entry.lock.locked()]
+            if not idle:
+                raise BrowserUnavailable(
+                    f"all {self.max_resident} browsers are busy; try again shortly"
+                )
+            await self.close(min(idle, key=lambda entry: entry.last_used).name)
 
     async def close(self, name: str) -> None:
         """
@@ -280,6 +456,47 @@ class BrowserGateway:
 
     # ── the actions ───────────────────────────────────────────────
 
+    def hold(self, profile: str, *, seconds: float) -> None:
+        """
+        Record that a person is driving this browser.
+
+        Held **here**, next to the browser, rather than asked over HTTP before
+        each action. The first version asked the control plane on every action
+        and then ran for up to 25 seconds, so a person could take the wheel a
+        millisecond after the check cleared and the bot would still snapshot
+        the login form they were typing into. It also failed open on every
+        error — a rotated token, a 2s timeout, a renamed function — which meant
+        the one moment the wheel exists for was the moment it stopped working.
+
+        :param profile: Whose browser.
+        :param seconds: How long the hold lasts.
+        """
+        entry = self._profiles.get(_canonical(profile))
+        if entry is not None:
+            entry.driving_until = time.monotonic() + seconds
+        self._held[_canonical(profile)] = time.monotonic() + seconds
+
+    def release(self, profile: str) -> None:
+        """
+        Hand a browser back to its bot.
+
+        :param profile: Whose browser.
+        """
+        name = _canonical(profile)
+        entry = self._profiles.get(name)
+        if entry is not None:
+            entry.driving_until = 0.0
+        self._held.pop(name, None)
+
+    def driven_by_a_person(self, profile: str) -> bool:
+        """
+        Whether a person holds this browser right now.
+
+        :param profile: Whose browser.
+        :returns: Whether a bot's actions must be refused.
+        """
+        return self._held.get(_canonical(profile), 0.0) > time.monotonic()
+
     async def perform(self, profile: str, action: str, args: dict[str, Any]) -> dict[str, Any]:
         """
         Do one thing to a page and say what happened.
@@ -299,6 +516,13 @@ class BrowserGateway:
             return {"ok": False, "error": str(exc)}
 
         async with entry.lock:
+            # Inside the lock, so an action cannot slip past a hold taken while
+            # it queued. It cannot abort one already running — that would need
+            # a cancel the page has no notion of — but nothing new starts.
+            if self.driven_by_a_person(profile):
+                result = {"ok": False, "error": WHEEL_REFUSAL}
+                self._record(entry, action, args, result)
+                return result
             try:
                 result = await asyncio.wait_for(
                     self._dispatch(entry, action, args), timeout=ACTION_TIMEOUT_S
@@ -313,13 +537,57 @@ class BrowserGateway:
                 self._record(entry, action, args, result)
                 return result
             except Exception as exc:  # noqa: BLE001 - a page can fail in any way
-                result = {"ok": False, "error": f"{action} failed: {exc}"}
+                result = {"ok": False, "error": _safe_error(f"{action} failed: {exc}")}
                 self._record(entry, action, args, result)
                 return result
             self._record(entry, action, args, result)
             entry.last_used = time.monotonic()
             await self._capture(entry)
             return result
+
+    async def _drifted(self, entry: _Profile, args: dict[str, Any], selector: str) -> str:
+        """
+        Whether the element behind a ref is still the one the snapshot named.
+
+        The ref is an attribute **in the page's own DOM**, which the page can
+        read and move. A hostile page that sees ``data-omni-ref="35"`` on a
+        harmless button can relocate it onto "Confirm transfer", and the
+        agent's next click — correct by every other check, with a current
+        snapshot id — lands there while the transcript still says it was the
+        button it read about.
+
+        Checked through Playwright's locator API rather than ``page.evaluate``,
+        deliberately: ``evaluate`` runs in the page's own JavaScript world,
+        where ``getAttribute`` and ``innerText`` are things the page can
+        rewrite. A verification a hostile page can implement is not one.
+
+        :param entry: The profile.
+        :param args: The tool's arguments.
+        :param selector: The resolved selector.
+        :returns: A refusal, or ``""`` to go ahead.
+        """
+        ref = args.get("ref")
+        if ref is None or not str(ref).strip().isdigit():
+            return ""
+        expected = entry.refs.get(int(str(ref).strip()))
+        if expected is None:
+            return ""
+        page = entry.page
+        try:
+            if await page.locator(f"{expected['tag']}{selector}").count() != 1:
+                return (
+                    f"ref {ref} named a {expected['tag']} and no longer does — the page "
+                    "moved it. Take a new browser_snapshot and read it before acting."
+                )
+            actual = await _describe(page.locator(selector).first)
+        except Exception:  # noqa: BLE001 - a page that will not answer is drift enough
+            return f"could not check what ref {ref} points at; take a new browser_snapshot"
+        if actual != expected["name"]:
+            return (
+                f"ref {ref} named {expected['name']!r} and now points at {actual!r} — "
+                "the page moved it. Take a new browser_snapshot and read it before acting."
+            )
+        return ""
 
     def _record(
         self, entry: _Profile, action: str, args: dict[str, Any], result: dict[str, Any]
@@ -346,8 +614,8 @@ class BrowserGateway:
                 "action": action,
                 "target": _target_summary(action, args),
                 "ok": bool(result.get("ok")),
-                "url": str(result.get("url") or ""),
-                "error": str(result.get("error") or ""),
+                "url": _safe_url(str(result.get("url") or "")),
+                "error": _safe_error(str(result.get("error") or "")),
             }
         )
 
@@ -370,11 +638,15 @@ class BrowserGateway:
             url = str(args.get("url", ""))
             if not url:
                 return {"ok": False, "error": "navigate needs a url"}
+            blocked = _blocked_reason(url)
+            if blocked:
+                return {"ok": False, "error": blocked}
             await page.goto(url, wait_until="domcontentloaded")
             # Every ref belonged to the old document. Dropping the snapshot id
             # turns a click on a stale ref into a clear "snapshot first" rather
             # than an eight-second wait for a selector that cannot match.
             entry.snapshot_id = None
+            entry.refs = {}
             return {"ok": True, "url": page.url, "title": await page.title()}
         if action == "snapshot":
             # Text plus a ref for everything clickable. The text alone is what
@@ -383,11 +655,22 @@ class BrowserGateway:
             # first live run gave up and fetched the HTML with curl instead.
             result = await page.evaluate(
                 _SNAPSHOT_JS,
-                [_INTERACTIVE, REF_ATTR, MAX_REFS, SNAPSHOT_CHARS, list(_SECRET_TYPES)],
+                [_INTERACTIVE, REF_ATTR, MAX_REFS, SNAPSHOT_CHARS],
             )
             elements = result.get("elements") or []
             entry.snapshot += 1
-            entry.snapshot_id = f"snap_{entry.snapshot}"
+            # A nonce, not a counter. A relaunched profile starts counting at
+            # one again, so `snap_1` from before an eviction would match
+            # `snap_1` after it — the staleness check passing on a different
+            # document in a different browser.
+            entry.snapshot_id = f"snap_{secrets.token_hex(8)}"
+            entry.refs = {
+                int(element["ref"]): {
+                    "tag": str(element.get("tag") or ""),
+                    "name": str(element.get("name") or ""),
+                }
+                for element in elements
+            }
             return {
                 "ok": True,
                 "snapshot_id": entry.snapshot_id,
@@ -404,6 +687,21 @@ class BrowserGateway:
             selector, error = _target(args, entry)
             if error:
                 return {"ok": False, "error": error}
+            drifted = await self._drifted(entry, args, selector)
+            if drifted:
+                return {"ok": False, "error": drifted}
+            if action == "type" and await _is_secret(page, selector):
+                # The one place the "ask a person to sign in" rule stops being
+                # an instruction and becomes a mechanism. A brief can be argued
+                # with by the page it is reading; this cannot.
+                return {
+                    "ok": False,
+                    "error": (
+                        "that is a password field. This browser is shared with a "
+                        "person: say what is being asked for and at what URL, and "
+                        "stop. Do not look for a credential."
+                    ),
+                }
             if action == "click":
                 await page.click(selector, timeout=8_000)
                 return {"ok": True, "url": page.url}
@@ -430,11 +728,19 @@ class BrowserGateway:
         return {"ok": False, "error": f"unknown browser action {action!r}"}
 
     def _frame_path(self, entry: _Profile) -> Path:
-        """Where this profile's next screenshot goes, outside its browser data."""
-        directory = self.root / "_shots"
+        """
+        Where this profile's next screenshot goes.
+
+        Under the profile's own directory. They used to share one ``_shots``
+        folder with the profile name in the filename, which handed every bot a
+        readable picture of every other bot's logged-in pages — the exact
+        cross-contamination :data:`PROFILE_ROOT` exists to prevent, undone by
+        the one artifact that is a photograph of the session.
+        """
+        directory = self.root / entry.name / "shots"
         directory.mkdir(parents=True, exist_ok=True)
         entry.shots += 1
-        return directory / f"{entry.name}-{entry.shots:03d}.jpg"
+        return directory / f"{entry.shots:03d}.jpg"
 
     # ── what a person sees ────────────────────────────────────────
 
@@ -469,7 +775,7 @@ class BrowserGateway:
                 await self._capture(entry)
         try:
             title = await entry.page.title()
-            url = entry.page.url
+            url = _safe_url(entry.page.url)
         except Exception:  # noqa: BLE001
             title, url = "", ""
         return {"ok": True, "dataUrl": entry.frame, "url": url, "title": title}
@@ -479,27 +785,152 @@ class BrowserGateway:
         return sorted(self._profiles)
 
 
+async def _describe(locator: Any) -> str:
+    """
+    The name a control goes by, read the way the snapshot named it.
+
+    Through the locator API, so the answer comes from Playwright's isolated
+    world rather than from functions the page is free to redefine.
+
+    :param locator: The element.
+    :returns: Its name, trimmed the same way the snapshot trims.
+    """
+    for attribute in ("aria-label",):
+        value = await locator.get_attribute(attribute)
+        if value:
+            return " ".join(str(value).split())[:80]
+    text = await locator.inner_text()
+    if text:
+        return " ".join(str(text).split())[:80]
+    for attribute in ("placeholder", "title"):
+        value = await locator.get_attribute(attribute)
+        if value:
+            return " ".join(str(value).split())[:80]
+    return ""
+
+
+async def _is_secret(page: Any, selector: str) -> bool:
+    """
+    Whether a field is one no bot may type into.
+
+    Read off the live element through the locator API — isolated world, so a
+    page cannot answer this question on its own behalf — and off the live
+    element rather than the snapshot, because a page can swap a text input for
+    a password one between the two.
+
+    Fails **closed**. A page that will not say what a field is is not a page to
+    type into.
+
+    :param page: The page.
+    :param selector: The resolved selector.
+    :returns: Whether typing must be refused.
+    """
+    try:
+        locator = page.locator(selector).first
+        if (await locator.get_attribute("type") or "").strip().lower() == "password":
+            return True
+        described = ""
+        for attribute in ("name", "autocomplete", "id", "aria-label", "placeholder"):
+            described += " " + (await locator.get_attribute(attribute) or "")
+        described = described.lower()
+    except Exception:  # noqa: BLE001
+        return True
+    return bool(_SECRET_NAME.search(described))
+
+
+def _safe_url(url: str) -> str:
+    """
+    A URL with the parts that carry secrets removed.
+
+    Scheme, host and path say where the browser is, which is what a person
+    watching needs. The query, the fragment and any ``user:pass@`` say *who it
+    is* — an OAuth callback is ``?code=…&state=…`` and an implicit-flow return
+    is ``#access_token=…``, both live credentials, both landing in a trail that
+    is rendered in a UI and screenshotted into tickets. A magic sign-in link is
+    the whole session in a query string.
+
+    :param url: The URL.
+    :returns: Scheme, host and path, with a marker when anything was dropped.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "(unreadable url)"
+    if not parts.scheme:
+        return url[:120]
+    host = parts.hostname or ""
+    port = f":{parts.port}" if parts.port else ""
+    trimmed = f"{parts.scheme}://{host}{port}{parts.path}"[:200]
+    if parts.query or parts.fragment or parts.username:
+        trimmed += " (query withheld)"
+    return trimmed
+
+
+#: Anything URL-shaped inside a longer string. Playwright quotes the URL it was
+#: working on into its exception text, so a failed navigation to an OAuth
+#: callback puts the authorization code in an error message — which is recorded,
+#: returned to the model, and rendered in the UI.
+_URL_IN_TEXT = re.compile(r"""[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>]+""")
+
+
+def _safe_error(text: str) -> str:
+    """
+    An error message with every URL in it redacted, and bounded.
+
+    :param text: The message.
+    :returns: Something safe to record.
+    """
+    return _URL_IN_TEXT.sub(lambda match: _safe_url(match.group(0)), text)[:400]
+
+
+async def _guard_request(route: Any, request: Any) -> None:
+    """
+    Let a request through, or abort it with a reason in the log.
+
+    :param route: Playwright's route handle.
+    :param request: The request.
+    """
+    blocked = _blocked_reason(request.url)
+    if blocked:
+        _logger.warning("browser gateway: refused %s — %s", _safe_url(request.url), blocked)
+        await route.abort("blockedbyclient")
+        return
+    await route.continue_()
+
+
+#: What a browser profile may be called. Deliberately narrow, and deliberately
+#: *validated* rather than sanitised — see :func:`_canonical`.
+_PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+
+
 def _canonical(profile: str) -> str:
     """
-    A profile name reduced to one canonical, filesystem-safe form.
+    One canonical name for a profile, or ``""`` when it is not a usable name.
 
-    Used for both the directory and the in-memory key, so a profile opened as
-    ``persist:bot-x`` is the same browser the Screen panel finds under
-    ``bot-x``. Two spellings of one profile would launch two Chromiums fighting
-    over one ``SingletonLock``, and the panel would show the wrong one.
+    Two rules, both learned the hard way.
 
-    Bot profiles are named ``persist:bot-<slug>`` — an Electron partition key,
-    which is where that prefix comes from. The colon is dropped because this is
-    a filesystem path, and everything outside a small alphabet is replaced
-    rather than trusted: this string arrives from a session label, and a name
-    containing ``..`` would otherwise choose the directory.
+    **Case-folded**, because a profile is a directory: the Screen panel asking
+    for ``Bot-A`` and the supervisor labelling sessions ``persist:bot-a`` were
+    two keys in this process and *one* directory on macOS and Windows — two
+    live Chromiums holding one profile's ``SingletonLock``, which is the exact
+    corruption ``PROFILE_ROOT`` exists to prevent, on the platform most of this
+    is developed on.
 
-    :param profile: The profile name.
-    :returns: A directory name.
+    **Refused, not repaired.** The first version replaced anything outside a
+    small alphabet with ``_``, so ``acme/prod``, ``acme:prod``, ``acme prod``
+    and ``acme_prod`` were one browser sharing one cookie jar — four
+    identities, one session, and an audit trail that cannot say which of them
+    did a thing. Silently merging identities is worse than refusing a name.
+
+    :param profile: The profile name, with or without its ``persist:`` prefix.
+    :returns: The canonical name, or ``""`` when it is unusable.
     """
-    bare = profile.removeprefix("persist:") or profile
-    safe = "".join(char if (char.isalnum() or char in "._-") else "_" for char in bare)
-    return safe.strip(".") or "default"
+    bare = profile.removeprefix("persist:").strip().casefold()
+    if ".." in bare or not _PROFILE_NAME.fullmatch(bare):
+        return ""
+    return bare
 
 
 def _target_summary(action: str, args: dict[str, Any]) -> str:
@@ -514,11 +945,10 @@ def _target_summary(action: str, args: dict[str, Any]) -> str:
     :returns: A short description, possibly empty.
     """
     if action == "navigate":
-        return str(args.get("url") or "")[:120]
-    ref = args.get("ref")
-    selector = str(args.get("selector") or "")[:80]
+        return _safe_url(str(args.get("url") or ""))
     if action in ("click", "type"):
-        where = f"ref {ref}" if ref is not None else selector
+        ref = args.get("ref")
+        where = f"ref {ref}" if ref is not None else "(no ref)"
         return f"{where} (text withheld)" if action == "type" else where
     return ""
 
@@ -548,7 +978,15 @@ def _target(args: dict[str, Any], entry: _Profile) -> tuple[str, str]:
         if entry.snapshot_id is None:
             return "", "no snapshot to resolve that ref against — take a browser_snapshot first"
         given = str(args.get("snapshot_id") or "").strip()
-        if given and given != entry.snapshot_id:
+        if not given:
+            # Required, not encouraged. Optional, the check was opt-out by the
+            # one party it exists to constrain: an injected agent simply omits
+            # the field and every stale ref is live again.
+            return "", (
+                f"pass the snapshot_id that ref {ref} came from — a ref without it "
+                "cannot be checked against the page it was read from"
+            )
+        if given != entry.snapshot_id:
             return "", (
                 f"ref {ref} came from {given}, which has been superseded by "
                 f"{entry.snapshot_id} — take a browser_snapshot and use its refs"
@@ -558,10 +996,18 @@ def _target(args: dict[str, Any], entry: _Profile) -> tuple[str, str]:
         if not str(ref).strip().isdigit():
             return "", f"ref must be a non-negative integer, got {ref!r}"
         return f'[{REF_ATTR}="{str(ref).strip()}"]', ""
-    selector = str(args.get("selector") or "").strip()
-    if selector:
-        return selector, ""
-    return "", "needs a ref from a recent browser_snapshot, or a CSS selector"
+    if str(args.get("selector") or "").strip():
+        # Refused, not honoured. A raw selector is a second channel that walks
+        # past every control the ref path provides: `input[type=password]`
+        # picks the field the agent was told never to touch, `xpath=` and
+        # Playwright's `>>` reach into frames the snapshot never showed, and
+        # none of it appears in the snapshot the operator can read. Anything
+        # worth acting on has a ref.
+        return "", (
+            "selectors are not accepted — take a browser_snapshot and act on a "
+            "[ref=N] from it, so what you act on is something you have read"
+        )
+    return "", "needs a ref from a recent browser_snapshot"
 
 
 def _data_url(image: bytes) -> str:

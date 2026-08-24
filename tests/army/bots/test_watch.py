@@ -8,6 +8,7 @@ parser stricter than the thing it parses. Each is pinned here by its failure.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from army.bots.workloads.watch import WatchWorkload
@@ -213,3 +214,49 @@ def test_both_browsing_workloads_carry_the_same_rules(tmp_path: Any) -> None:
         assert DATA_NOT_COMMAND in brief
         assert ASK_FOR_A_SIGN_IN in brief
         assert "[ref=N]" in brief
+
+
+def test_a_replaced_baseline_is_still_readable(tmp_path: Any) -> None:
+    """A wrong baseline is how a watcher goes quietly blind.
+
+    "CHANGED — the page now shows a login wall" leads with CHANGED, so it
+    becomes the baseline; nothing inside the workload can tell that apart from
+    a real reading, and prose-sniffing the rest would be worse than the bug.
+    What can be done is keep the thing it replaced, in the bot's own workspace
+    where the Files panel shows it — so "why has this been quiet for a week" is
+    answerable rather than a mystery.
+    """
+    workload = _workload(tmp_path)
+    workload.evaluate(_run(reply="CHANGED\n\nTier 1: 0.40% / 0.80%"))
+    workload.evaluate(_run(reply="CHANGED — the page now shows a login wall"))
+
+    kept = json.loads((tmp_path / "last-seen.json").read_text())
+    assert "login wall" in kept["summary"]
+    assert "0.40%" in kept["previously"], "the good baseline survives its replacement"
+
+
+def test_an_unparseable_verdict_asks_rather_than_going_quiet(tmp_path: Any) -> None:
+    """No-news and cannot-tell are the same silence, and must not be.
+
+    An agent that opens "Here's what I found:" produced no verdict, which read
+    as UNCHANGED — so a watcher that had stopped working looked exactly like
+    one with nothing to report.
+    """
+    for reply in ("Here's what I found:", "", "Please log in to continue"):
+        question, options, evidence = _workload(tmp_path).evaluate(_run(reply=reply))
+        assert question, f"{reply!r} must not read as no-news"
+        assert options == ["look again", "stop"]
+        assert "unparsed" in evidence
+
+
+def test_the_ordinary_verdicts_still_work(tmp_path: Any) -> None:
+    """The parser got stricter; it must not have got narrower."""
+    for reply, expect_question in (
+        ("CHANGED\n\n0.40%", True),
+        ("**CHANGED**\n\n0.40%", True),
+        ("### Unchanged — same as yesterday", False),
+        ("UNCHANGED", False),
+        ("LOGIN\n\nwants a password", True),
+    ):
+        question, _, _ = _workload(tmp_path).evaluate(_run(reply=reply))
+        assert bool(question) is expect_question, reply

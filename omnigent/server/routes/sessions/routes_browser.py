@@ -96,26 +96,6 @@ def register_browser_routes(
         profile = labels.get(_BROWSER_PROFILE_LABEL)
         return str(profile) if profile else None
 
-    async def _wheel_refusal(profile: str) -> str:
-        """
-        Whether a person has taken this browser, and what to say.
-
-        Asked over the same loopback boundary the bots proxy uses, so this
-        module imports nothing from ``army``. Fails **open**: a control plane
-        that is down or slow must not freeze every bot's browser, and the
-        refusal is a courtesy to the agent rather than the boundary — nothing
-        here is what stops a bot doing something it must not.
-
-        :param profile: The browser profile the action would drive.
-        :returns: The refusal text, or ``""`` to proceed.
-        """
-        try:
-            from omnigent.server.routes.bots import wheel_refusal_for_profile
-
-            return await wheel_refusal_for_profile(profile)
-        except Exception:
-            return ""
-
     @router.post(
         "/sessions/{session_id}/browser/action_request",
         # Internal embedded-browser flow — hidden from the public API reference.
@@ -166,13 +146,12 @@ def register_browser_routes(
         # would otherwise sit until they timed out.
         profile = _gateway_profile(conversation_store, session_id)
         if profile is not None:
-            refusal = await _wheel_refusal(profile)
-            if refusal:
-                # Refused, not queued. A queued click lands after the person
-                # has navigated away, on a page that is no longer the one it
-                # was reasoned about — including reads, because a snapshot
-                # taken while somebody is typing a password transcribes it.
-                return {"ok": False, "error": refusal}
+            # Whether a person holds the wheel is decided inside the gateway,
+            # next to the browser and inside the lock that serialises actions
+            # on it. Asking the control plane here instead meant an HTTP round
+            # trip that failed open on every error, followed by up to
+            # twenty-five seconds of action — so a person could take the wheel
+            # and still have the bot snapshot the form they were typing into.
             from omnigent.browser import gateway as _browser_gateway
 
             return await _browser_gateway().perform(profile, action, args)

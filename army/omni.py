@@ -15,6 +15,7 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 #: The session label whose presence routes ``browser_*`` actions to the
@@ -22,6 +23,27 @@ from typing import Any
 #: does not have. One string, named once: it is a contract between this package
 #: and ``omnigent.server``, and a typo on either side is silent.
 BROWSER_PROFILE_LABEL = "omnigent.browser.profile"
+
+
+#: Where the control plane's shared secret lives, and the header it travels in.
+#: The server-side half is :mod:`omnigent.browser.authority`; the file is the
+#: one ``army.bots.web`` mints, inside the directory
+#: :data:`army.bots.isolation.CONTROL_PLANE_DIRS` withholds from every bot.
+CONTROL_TOKEN_FILE = Path.home() / ".omnigent" / "army" / "web-token"
+CONTROL_HEADER = "X-Omnigent-Control"
+
+
+def _control_token() -> str | None:
+    """
+    The control plane's secret, or ``None`` when Bot mode has never run.
+
+    :returns: The token, or ``None``.
+    """
+    try:
+        secret = CONTROL_TOKEN_FILE.read_text().strip()
+    except OSError:
+        return None
+    return secret or None
 
 
 class OmniError(RuntimeError):
@@ -196,6 +218,13 @@ class OmniClient:
             headers["Content-Type"] = "application/json"
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
+        # Proves this is the control plane rather than one of its bots. The
+        # server refuses a browser-profile label without it, because a label
+        # that names a browser is a label that names an identity — and a bot's
+        # body is an ordinary session with a shell in it.
+        control = _control_token()
+        if control:
+            headers[CONTROL_HEADER] = control
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:

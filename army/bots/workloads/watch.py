@@ -161,12 +161,14 @@ class WatchWorkload:
         """
         reply = str(run.artifacts.get("reply") or "").strip()
         headline = reply.split("\n", 1)[0].strip() if reply else ""
-        # Models write "**CHANGED**", "CHANGED:", "### UNCHANGED". Matching the
-        # bare word against the raw line reads every one of those as "the agent
-        # did not say" and drops a real answer on the floor. Letters only, and
-        # ``UNCHANGED`` cannot collide because it starts "UN".
-        verdict = re.sub(r"[^A-Z]", "", headline.upper())
-        changed = verdict.startswith("CHANGED")
+        # The first *word*, not the line with its punctuation removed. Models
+        # write "**CHANGED**", "### UNCHANGED", "CHANGED:" — so the markdown
+        # has to go. But stripping everything and matching a prefix read
+        # "CHANGED — the page now shows a login wall" as CHANGED, which wrote
+        # the login wall in as the baseline: every later iteration compared
+        # against it, reported UNCHANGED, and the watcher went quietly blind.
+        found = re.match(r"[^A-Za-z]*([A-Za-z]+)", headline)
+        verdict = found.group(1).upper() if found else ""
 
         evidence = {
             "url": self.url,
@@ -180,7 +182,7 @@ class WatchWorkload:
         # this very browser and signing in themselves — which is the one thing
         # a shared browser makes possible and a screenshot-beside-a-fetch
         # cannot. No baseline is written: nothing was read.
-        if verdict.startswith("LOGIN"):
+        if verdict == "LOGIN":
             evidence["needs"] = "somebody to sign in on this browser"
             return (
                 f"{self.url} wants a sign-in",
@@ -188,16 +190,27 @@ class WatchWorkload:
                 evidence,
             )
 
-        if changed:
+        if verdict == "CHANGED":
             self._remember(reply)
             report = self._write_report(run, reply)
             if report:
                 evidence["report"] = report.name
             return (f"{self.url} changed", ["acknowledge", "stop"], evidence)
 
-        # Nothing new. Asking a person to confirm that is how a watcher trains
-        # them to ignore it.
-        return ("", [], evidence)
+        if verdict == "UNCHANGED":
+            # Nothing new. Asking a person to confirm that is how a watcher
+            # trains them to ignore it.
+            return ("", [], evidence)
+
+        # Anything else is an answer nobody can act on. Reading it as no-news
+        # is the dangerous default: a watcher that cannot parse its own agent
+        # goes silent, and silence is what it says when the page has not
+        # moved — so a broken watcher is indistinguishable from a calm one.
+        return (
+            f"could not tell whether {self.url} changed",
+            ["look again", "stop"],
+            {**evidence, "unparsed": headline or "(the agent said nothing)"},
+        )
 
     def apply(
         self,
@@ -233,7 +246,18 @@ class WatchWorkload:
             return None
 
     def _remember(self, reply: str) -> None:
-        """Write the new baseline, so the next wake has something to compare."""
+        """
+        Write the new baseline, keeping the one it replaces.
+
+        The baseline is the whole feature and also the whole failure mode: a
+        wrong one makes every later iteration report UNCHANGED, and a watcher
+        that has gone blind says exactly what a watcher with nothing to report
+        says. It cannot be detected from inside — an agent that leads with
+        CHANGED and then explains it could not read the page has still said
+        CHANGED — so the defence is that the previous baseline survives in the
+        bot's own workspace, where the Files panel shows it and a person can
+        see what it was replaced with.
+        """
         self.state.parent.mkdir(parents=True, exist_ok=True)
         self.state.write_text(
             json.dumps(
@@ -241,6 +265,7 @@ class WatchWorkload:
                     "url": self.url,
                     "seen_at": datetime.now(UTC).isoformat(timespec="seconds"),
                     "summary": reply[:1_000],
+                    "previously": self._last(),
                 },
                 indent=2,
             )

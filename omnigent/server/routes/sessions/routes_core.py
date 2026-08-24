@@ -133,6 +133,7 @@ from omnigent.server.routes._sessions.helpers import (
     _publish_terminal_pending,
     _reject_reserved_cost_control_label_seed,
     _reject_server_reserved_label_seed,
+    _reject_unauthorised_browser_profile,
     _require_collaboration_mode_forward,
     _require_cost_control_label_authority,
     _require_permission_mode_forward,
@@ -290,6 +291,13 @@ def register_core_routes(
             # on this route 500'd as internal_error. The human-readable
             # message survives in each entry's `msg`.
             raise HTTPException(status_code=422, detail=exc.errors(include_context=False)) from exc
+
+        # Which browser a session drives is decided by a label, and a label
+        # anyone may set is a bearer capability: a bot that knows another bot's
+        # slug could otherwise open a session naming that bot's profile and
+        # read its logged-in pages, attributed to the victim. Gated on the
+        # control plane's own secret, which bots are not given.
+        _reject_unauthorised_browser_profile(body.labels, request)
 
         resp = await _create_session_from_existing_agent(
             conversation_store,
@@ -586,6 +594,7 @@ def register_core_routes(
         parsed_metadata = _parse_session_create_metadata(metadata)
         _reject_reserved_cost_control_label_seed(parsed_metadata.labels)
         _reject_server_reserved_label_seed(parsed_metadata.labels)
+        _reject_unauthorised_browser_profile(parsed_metadata.labels, request)
 
         inherited_runner_id: str | None = None
         if parsed_metadata.parent_session_id is not None:
@@ -1556,6 +1565,9 @@ def register_core_routes(
                 )
         if body.labels:
             _reject_server_reserved_label_seed(body.labels)
+            # Also on update: gating creation alone would mean opening a plain
+            # session and then labelling it.
+            _reject_unauthorised_browser_profile(body.labels, request)
             # Advisor-owned cost_control.* labels are written only by the
             # session's bound runner; gate them on runner proof BEFORE any
             # store mutation so a rejected request leaves the session untouched.
