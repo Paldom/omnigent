@@ -115,8 +115,14 @@ def test_unchanged_is_not_mistaken_for_changed(tmp_path: Any) -> None:
         assert options == []
 
 
-def test_the_browser_profile_label_rides_on_the_session(tmp_path: Any) -> None:
-    """The label is the whole routing decision; without it there is no gateway."""
+def test_the_workload_does_not_name_the_browser(tmp_path: Any) -> None:
+    """Two places to name a bot's browser is one place to get it wrong.
+
+    The watcher labelled its own sessions and the research workload did not, so
+    nine of ten bots in the crypto example could not browse at all and nothing
+    said so. The supervisor labels every session now; a workload that also did
+    it would be the fork.
+    """
     seen: dict[str, Any] = {}
 
     class Recording(FakeOmni):
@@ -124,7 +130,66 @@ def test_the_browser_profile_label_rides_on_the_session(tmp_path: Any) -> None:
             seen.update(kwargs)
             return super().create_session(agent_id, **kwargs)
 
-    workload = _workload(tmp_path, profile="bot-kraken-fee-watch", agent="claude-native-ui")
-    workload.dispatch(_run(), Recording())
+    _workload(tmp_path, agent="claude-native-ui").dispatch(_run(), Recording())
 
-    assert seen["labels"] == {"omnigent.browser.profile": "bot-kraken-fee-watch"}
+    assert "labels" not in seen
+
+
+def test_a_login_wall_asks_for_a_person_rather_than_a_credential(tmp_path: Any) -> None:
+    """The escalation a shared browser exists for.
+
+    A bot that meets a sign-in page has exactly two options worth having: stop,
+    or ask a person to take the wheel of *this* browser and sign in. Anything
+    that involves the bot obtaining a credential is the wrong one — and a
+    screenshot taken beside an agent's own fetching could not offer the right
+    one, because the person would be signing in to a different browser.
+    """
+    reply = "LOGIN\n\nKraken wants an email and password at /sign-in before it shows VIP tiers."
+    question, options, evidence = _workload(tmp_path).evaluate(_run(reply=reply))
+
+    assert "sign-in" in question
+    assert options == ["I signed in — look again", "stop"]
+    assert evidence["needs"] == "somebody to sign in on this browser"
+
+
+def test_a_login_wall_records_no_baseline(tmp_path: Any) -> None:
+    """Nothing was read, so there is nothing to compare against next time.
+
+    Recording the login page as the baseline would make the next real reading
+    look like a change, and the one after it look like nothing happened.
+    """
+    workload = _workload(tmp_path)
+    workload.evaluate(_run(reply="LOGIN\n\nwants a password"))
+
+    assert not (tmp_path / "last-seen.json").exists()
+
+
+def test_signing_in_sends_the_bot_round_again(tmp_path: Any) -> None:
+    """The profile is persistent, so the session a person just made is live."""
+    state, reason = _workload(tmp_path).apply(
+        _run(), "approve", {"choice": "I signed in — look again"}
+    )
+
+    assert state == "continue"
+    assert "signed in" in reason
+
+
+def test_the_brief_forbids_the_bot_handling_credentials(tmp_path: Any) -> None:
+    """The instruction has to be explicit, and it has to close the side doors.
+
+    "Do not type a password" alone leaves looking one up in the workspace on
+    the table, which is the interesting failure.
+    """
+    brief = _workload(tmp_path)._brief(_run())
+
+    assert "Do not type a password" in brief
+    assert "do not" in brief and "try to find one" in brief
+    assert "LOGIN" in brief
+
+
+def test_the_brief_explains_refs(tmp_path: Any) -> None:
+    """Snapshots name what is clickable; a brief that omits it wastes the feature."""
+    brief = _workload(tmp_path)._brief(_run())
+
+    assert "[ref=N]" in brief
+    assert "snapshot_id" in brief

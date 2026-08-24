@@ -38,9 +38,21 @@ class FakeOmni:
         #: workload read human answers as its agent's work and still pass.
         self.agent_replies: list[str] = []
 
+        #: Labels the supervisor asked every session to carry, via
+        #: :meth:`with_labels`. Recorded rather than merged so a test can see
+        #: what the fleet decided, not only what a workload passed.
+        self.default_labels: dict[str, str] = {}
+        #: Every ``create_session`` call's labels, in order.
+        self.labelled: list[dict[str, str]] = []
+
+    def with_labels(self, labels: dict[str, str]) -> FakeOmni:
+        self.default_labels = {**self.default_labels, **labels}
+        return self
+
     def create_session(self, agent_id: str, **kwargs: Any) -> str:
         session_id = f"conv_{len(self.sessions):032d}"
         self.sessions.append(session_id)
+        self.labelled.append({**self.default_labels, **(kwargs.get("labels") or {})})
         return session_id
 
     def send(self, session_id: str, text: str) -> None:

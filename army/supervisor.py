@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from army.lanes import Lanes
-from army.omni import OmniClient, OmniError, barrier_marker
+from army.omni import BROWSER_PROFILE_LABEL, OmniClient, OmniError, barrier_marker
 from army.state import Command, CommandKind, Run, RunState
 from army.store import ConcurrentTransition, Store
 from army.workload import Workload
@@ -308,10 +308,28 @@ class Supervisor:
         moved = self._transition(run, RunState.DISPATCHING, attempt=run.attempt + 1, now=now)
         return self._dispatch_children(moved, now=now)
 
+    def _omni_for(self, run: Run) -> OmniClient:
+        """
+        The client a workload gets, carrying this run's session labels.
+
+        Every session a bot opens should name the browser that bot owns, and
+        that is not a per-workload decision: the watcher set the label itself
+        and the research workload — which nine of ten bots in the crypto
+        example use — did not, so nine bots had no browser and nothing said so.
+        Setting it here means a workload cannot forget.
+
+        :param run: The run about to dispatch.
+        :returns: The client, labelled when the run names a browser.
+        """
+        profile = str(run.artifacts.get("browser_profile") or "")
+        if not profile:
+            return self.omni
+        return self.omni.with_labels({BROWSER_PROFILE_LABEL: profile})
+
     def _dispatch_children(self, run: Run, *, now: int) -> Run | None:
         """Start the workload's sessions and move on to collecting them."""
         try:
-            sessions = self._workload_for(run).dispatch(run, self.omni)
+            sessions = self._workload_for(run).dispatch(run, self._omni_for(run))
         except OmniError as exc:
             if exc.is_transient:
                 # Leave it in DISPATCHING; the next tick tries again and the

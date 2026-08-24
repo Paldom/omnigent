@@ -45,6 +45,7 @@ import type {
   BotApproval,
   BotDetail,
   BotDraft,
+  BotRun,
   BotStatus,
   BotSummary,
   Lineage,
@@ -585,6 +586,43 @@ function ChannelLine({ kind, author, body, at }: BotDetail["channel"][number]) {
         <span className="ml-auto font-mono">{ago(at)}</span>
       </p>
       <p className="m-0 mt-0.5 whitespace-pre-wrap">{body}</p>
+    </div>
+  );
+}
+
+/**
+ * The bot, working, at the foot of its own channel.
+ *
+ * A channel that shows only completed messages goes silent for the minutes an
+ * iteration takes, and silence reads as broken — the same reason a chat app
+ * shows somebody typing. This is the honest version of that: it appears only
+ * while a run is genuinely in flight, it says which run, and it opens the
+ * session so "what is the harness actually doing" is one click rather than a
+ * guess.
+ *
+ * The disc pulses under `motion-safe` only. A permanent animation is a
+ * vestibular problem for some people and an unignorable distraction for more.
+ */
+function Presence({ status, run }: { status: BotStatus; run: BotRun | undefined }) {
+  if (status !== "running") return null;
+  return (
+    <div className="flex items-baseline gap-2 border-[var(--border-weak)] border-t py-2.5 text-muted-foreground text-sm">
+      <span
+        aria-hidden
+        className="size-2 shrink-0 self-center rounded-full bg-[var(--status-green)] motion-safe:animate-pulse"
+      />
+      <span className="text-foreground">working</span>
+      {run && <span className="font-mono">{run.id.slice(0, 12)}</span>}
+      {run?.sessionId && (
+        <Link
+          to={`/c/${run.sessionId}`}
+          className="inline-flex items-center gap-1 underline-offset-2 hover:text-foreground hover:underline"
+        >
+          <ExternalLinkIcon className="size-3" />
+          watch it
+        </Link>
+      )}
+      {run && <span className="ml-auto font-mono">{ago(run.at)}</span>}
     </div>
   );
 }
@@ -1344,6 +1382,8 @@ export function BotsPage() {
                     <ChannelLine key={message.seq} {...message} />
                   ))
                 )}
+
+                <Presence status={detail.data.status} run={detail.data.runs[0]} />
               </>
             )}
           </div>

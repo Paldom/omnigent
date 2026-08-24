@@ -25,6 +25,7 @@ from army.bots.store import BotStore
 from army.bots.supervisor import BotSupervisor
 from army.bots.workloads.heartbeat import HeartbeatWorkload
 from army.bots.workspace import DocKind, Workspace
+from army.omni import OmniClient
 from army.state import CommandKind, Run, RunState
 from army.store import Store
 from tests.army.bots.conftest import FakeOmni, StubRegistry, activate, make_bot
@@ -735,3 +736,77 @@ def test_a_watcher_with_nothing_to_report_asks_nobody(bots: BotStore, store: Sto
     assert runs[0].artifacts.get("asked") is False
     # And nobody was asked anything.
     assert not [r for r in runs if r.state is RunState.WAITING_HUMAN]
+
+
+class _OpensASession(HeartbeatWorkload):
+    """A workload that opens a body and does nothing about browsers.
+
+    Which is the case that matters: the guarantee has to hold for a workload
+    whose author never thought about browsing at all.
+    """
+
+    def dispatch(self, run: Run, omni: OmniClient) -> list[str]:
+        return [omni.create_session("agent", title="work")]
+
+    def collect(self, run: Run, omni: OmniClient) -> tuple[bool, dict[str, object]]:
+        return True, {"outcome": self.outcome}
+
+
+def _fleet_with(store: Store, bots: BotStore, omni: FakeOmni) -> BotSupervisor:
+    return BotSupervisor(
+        store,
+        omni,
+        bots,
+        StubRegistry({HEARTBEAT: _OpensASession(outcome="work_done")}),
+        messages=MessageStore(bots),
+        approvals=ApprovalStore(bots, messages=MessageStore(bots)),
+    )
+
+
+def test_every_bot_gets_its_own_browser_whatever_workload_it_runs(
+    store: Store, bots: BotStore
+) -> None:
+    """A browser is a property of the bot, not a favour a workload does it.
+
+    The watcher labelled its own sessions; the research workload — which nine
+    of the ten bots in the crypto example run — did not. So nine bots could not
+    drive a browser at all, their ``browser_*`` calls waited on a desktop
+    renderer no headless fleet has, and every one of them timed out silently
+    thirty seconds later. The label belongs where a workload author cannot
+    forget it.
+    """
+    omni = FakeOmni()
+    fleet = _fleet_with(store, bots, omni)
+    activate(
+        bots,
+        make_bot(
+            "scout",
+            workload=HEARTBEAT,
+            wake=_continuous(),
+            browser_profile="persist:bot-scout",
+        ),
+        now=NOW,
+    )
+    for offset in range(4):
+        fleet.fleet_tick(now=NOW + offset)
+
+    assert omni.labelled, "the bot never opened a session"
+    assert all(
+        labels.get("omnigent.browser.profile") == "persist:bot-scout" for labels in omni.labelled
+    ), omni.labelled
+
+
+def test_a_bot_with_no_browser_profile_gets_no_label(store: Store, bots: BotStore) -> None:
+    """An empty label would route every unprofiled bot to one shared browser."""
+    omni = FakeOmni()
+    fleet = _fleet_with(store, bots, omni)
+    activate(
+        bots,
+        make_bot("scout", workload=HEARTBEAT, wake=_continuous(), browser_profile=None),
+        now=NOW,
+    )
+    for offset in range(4):
+        fleet.fleet_tick(now=NOW + offset)
+
+    assert omni.labelled, "the bot never opened a session"
+    assert all("omnigent.browser.profile" not in labels for labels in omni.labelled)

@@ -627,6 +627,43 @@ describe("BotsPage", () => {
     expect(screen.getByText(/refused — not queued/)).toBeInTheDocument();
   });
 
+  it("shows a running bot working, with a way into the session", async () => {
+    // A channel that only shows finished messages goes silent for the minutes
+    // an iteration takes, and silence reads as broken.
+    listBots.mockResolvedValue(
+      fleet({ bots: [bot("scout", { status: "running", needsHuman: false })] }),
+    );
+    getBot.mockResolvedValue(
+      detail({
+        pending: [],
+        status: "running",
+        runs: [
+          {
+            id: "be088b426a71bbbb",
+            state: "collecting",
+            outcome: null,
+            reason: null,
+            at: Date.now() / 1000 - 45,
+            sessionId: "conv_live",
+          },
+        ],
+      }),
+    );
+    renderPage();
+
+    expect(await screen.findByText("working")).toBeInTheDocument();
+    expect(screen.getByText("be088b426a71")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /watch it/ })).toHaveAttribute("href", "/c/conv_live");
+  });
+
+  it("does not claim a bot is working when it is not", async () => {
+    getBot.mockResolvedValue(detail({ pending: [], status: "waiting_human" }));
+    renderPage();
+
+    await screen.findByText(/Merge the candidate patch|Watch/);
+    expect(screen.queryByText("working")).not.toBeInTheDocument();
+  });
+
   it("shows what the bot made its browser do, newest first", async () => {
     // A frame says where the browser is. Watching a bot work means seeing the
     // steps — and a wrong action is only explicable if the attempt was written

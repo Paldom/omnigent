@@ -69,12 +69,11 @@ class WatchWorkload:
     :param host: The Omnigent host the body runs on.
     :param workspace: The bot's directory; reports land in ``reports/``.
     :param charter: Prepended to the brief, absolute or workspace-relative.
-    :param profile: The browser profile this bot drives, conventionally
-        ``bot-<slug>`` so the viewer can find it by name. Its own, never
-        shared: one profile across bots means one bot's compromise is every
-        bot's session, and an audit trail that cannot say which bot did a
-        thing. Without it the session carries no label and its browser actions
-        fall back to a desktop renderer, which a headless fleet does not have.
+
+    Names no browser. A bot has exactly one, ``bot.browser_profile``, and the
+    supervisor labels every session with it — its own, never shared, because
+    one profile across bots means one bot's compromise is every bot's session
+    and an audit trail that cannot say which bot did a thing.
     """
 
     name = "watch"
@@ -89,7 +88,6 @@ class WatchWorkload:
         host: str | None = None,
         workspace: str = ".",
         charter: str | None = None,
-        profile: str | None = None,
     ) -> None:
         self.url = url
         self.question = question
@@ -98,7 +96,6 @@ class WatchWorkload:
         self.agent = agent
         self.host = host
         self.charter = self._resolve(charter) if charter else None
-        self.profile = profile
 
     def _resolve(self, path: str) -> Path:
         candidate = Path(path).expanduser()
@@ -124,20 +121,16 @@ class WatchWorkload:
         :param omni: The Omnigent client.
         :returns: The session id.
         """
-        # The bot's own profile, recorded on the run by the supervisor. The
-        # constructor argument is a seam for tests and for driving this
-        # workload outside a fleet; a bot in a fleet has exactly one browser
-        # and it is not a workload's business to name it.
-        profile = str(run.artifacts.get("browser_profile") or self.profile or "")
+        # No browser label here. The supervisor puts the bot's own profile on
+        # every session it opens, so this workload cannot get it wrong and the
+        # next one cannot forget it — which is exactly what happened to the
+        # research workload, leaving nine of ten bots unable to browse with
+        # nothing anywhere saying so.
         session = omni.create_session(
             omni.resolve_agent(self.agent),
             title=f"watch: {self.url[:60]}",
             workspace=str(self.workspace),
             host_id=self.host,
-            # The label is the whole routing decision: with it, this session's
-            # browser actions run in the server-owned gateway, which a headless
-            # fleet has and a subscribed desktop renderer is not.
-            labels=({"omnigent.browser.profile": profile} if profile else None),
         )
         omni.send(session, self._brief(run))
         return [session]
@@ -196,6 +189,19 @@ class WatchWorkload:
             "verdict": headline or "the agent did not say",
         }
 
+        # A wall the bot must not climb. It is asked to stop rather than to
+        # find a credential, and the answer is a person taking the wheel of
+        # this very browser and signing in themselves — which is the one thing
+        # a shared browser makes possible and a screenshot-beside-a-fetch
+        # cannot. No baseline is written: nothing was read.
+        if verdict.startswith("LOGIN"):
+            evidence["needs"] = "somebody to sign in on this browser"
+            return (
+                f"{self.url} wants a sign-in",
+                ["I signed in — look again", "stop"],
+                evidence,
+            )
+
         if changed:
             self._remember(reply)
             report = self._write_report(run, reply)
@@ -223,6 +229,12 @@ class WatchWorkload:
         """
         if decision != "approve" or payload.get("choice") == "stop":
             return "paused", "stood down by the operator"
+        # "I signed in" is not an acknowledgement of anything — the page was
+        # never read. Going round again is the point, and the browser profile
+        # is persistent, so the session the person just established is the one
+        # the next iteration opens on.
+        if str(payload.get("choice", "")).startswith("I signed in"):
+            return "continue", "signed in by a person; looking again"
         return "continue", "change acknowledged"
 
     # ── the baseline ──────────────────────────────────────────────
@@ -279,15 +291,28 @@ class WatchWorkload:
             f"{baseline}"
             "## How to look\n\n"
             "Use `browser_navigate` to open the page, then `browser_snapshot` "
-            "to read it and `browser_screenshot` if a picture settles it. This "
-            "is a real browser and the operator can see it — and can take the "
-            "wheel, in which case your actions will be refused with a reason "
-            "until they hand it back. If that happens, wait and say so; do not "
-            "retry in a loop.\n\n"
+            "to read it and `browser_screenshot` if a picture settles it. The "
+            "snapshot names every clickable thing as `[ref=N]`; pass a ref and "
+            "the `snapshot_id` it came from to `browser_click` rather than "
+            "guessing a CSS selector. A collapsed section usually opens with "
+            "one click.\n\n"
+            "This is a real browser and the operator can see it — and can take "
+            "the wheel, in which case your actions will be refused with a "
+            "reason until they hand it back. If that happens, wait and say so; "
+            "do not retry in a loop.\n\n"
+            "## If the page wants you to sign in\n\n"
+            "**Stop and ask.** Do not type a password, a card number, a "
+            "one-time code or any other credential into any field, and do not "
+            "try to find one — not in this workspace, not in the environment, "
+            "not on another page. This browser is shared with a person: they "
+            "take the wheel, sign in themselves, and hand it back with the "
+            "session live, which is the whole reason it is shared. Reply with "
+            "**LOGIN** on a line of its own and say what is being asked for "
+            "and at what URL.\n\n"
             f"{_DATA_NOT_COMMAND}\n\n"
             "## Your reply\n\n"
-            "Open with **CHANGED** or **UNCHANGED** on a line of its own. Then "
-            "the number or fact you were asked for, then how you know — the "
-            "URL and what the page actually said. Keep it short.\n\n"
+            "Open with **CHANGED**, **UNCHANGED** or **LOGIN** on a line of "
+            "its own. Then the number or fact you were asked for, then how you "
+            "know — the URL and what the page actually said. Keep it short.\n\n"
             f"Run id `{run.id[:12]}`.\n"
         )

@@ -17,6 +17,12 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+#: The session label whose presence routes ``browser_*`` actions to the
+#: server-owned browser gateway instead of a desktop renderer a headless fleet
+#: does not have. One string, named once: it is a contract between this package
+#: and ``omnigent.server``, and a typo on either side is silent.
+BROWSER_PROFILE_LABEL = "omnigent.browser.profile"
+
 
 class OmniError(RuntimeError):
     """An Omnigent API call failed.
@@ -141,10 +147,32 @@ class OmniClient:
         base_url: str = "http://localhost:6767",
         token: str | None = None,
         timeout: float = 30.0,
+        default_labels: dict[str, str] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        self.default_labels = dict(default_labels or {})
+
+    def with_labels(self, labels: dict[str, str]) -> OmniClient:
+        """
+        A client that puts *labels* on every session it opens.
+
+        The alternative is every workload remembering to label its own
+        sessions, which is one line each and was missing from the workload nine
+        of ten bots use — so nine bots had no browser and nothing said so. A
+        label that decides whether a capability exists belongs where no author
+        can forget it.
+
+        :param labels: Labels to merge into every ``create_session``.
+        :returns: A client sharing this one's connection settings.
+        """
+        return OmniClient(
+            self.base_url,
+            self.token,
+            self.timeout,
+            default_labels={**self.default_labels, **labels},
+        )
 
     def _request(
         self,
@@ -266,8 +294,9 @@ class OmniClient:
         :returns: The new session id.
         """
         body: dict[str, Any] = {"agent_id": agent_id}
-        if labels:
-            body["labels"] = dict(labels)
+        merged = {**self.default_labels, **(labels or {})}
+        if merged:
+            body["labels"] = merged
         if title is not None:
             body["title"] = title
         if harness is not None:
