@@ -21,6 +21,7 @@ definition of done.
 | Bots route in `web/src/App.tsx` | Routes are a hard-coded list; a section cannot be registered from outside it. Two lines: a `withPageView`+`lazy` binding and one `<Route>`. | not filed — a route registry is a large upstream ask | upstream grows a route/nav extension point |
 | Bots row in `web/src/shell/Sidebar.tsx` | Navigation is likewise a hard-coded list, and the active-item hook is a chain of path tests. Adds an entry, a branch in `useActiveNavItem`, and the badge count. | same | same |
 | Bots router in `omnigent/server/app.py` | Two lines in the router block, so the page has a same-origin endpoint. The router itself is an added file that imports nothing from `army`. | same | same |
+| Browser-profile session seam | Routes a session's `browser_*` actions to the server-owned browser by label, and reserves that label so only the control plane can set it — the label decides which cookie jar an agent reaches, so anyone able to set it can act as another bot. `+140/−1` across `routes_browser.py`, `routes_core.py` and `_sessions/helpers.py`. | [#5367](https://github.com/omnigent-ai/omnigent/issues/5367) | the seam lands upstream, or the issue is closed as out of scope |
 
 ## Not patches — additions alongside
 
