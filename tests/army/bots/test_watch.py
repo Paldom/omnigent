@@ -260,3 +260,19 @@ def test_the_ordinary_verdicts_still_work(tmp_path: Any) -> None:
     ):
         question, _, _ = _workload(tmp_path).evaluate(_run(reply=reply))
         assert bool(question) is expect_question, reply
+
+
+def test_the_workspace_is_made_before_the_session_opens(tmp_path: Any) -> None:
+    """The server refuses a session on a directory that is not there.
+
+    And the refusal names the *host* — "workspace path does not exist on host
+    'HUL-0095.local'" — which lands one layer below anything the operator
+    wrote, in a run that reads as a broken harness. A fresh clone of an example
+    should not need a `mkdir` nobody documented.
+    """
+    workspace = tmp_path / "not-yet"
+    workload = WatchWorkload(url="https://example.com", question="q", workspace=str(workspace))
+
+    workload.dispatch(_run(), FakeOmni())
+
+    assert workspace.is_dir()

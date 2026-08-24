@@ -1,0 +1,42 @@
+# nightshift — a standing crew for the things nobody remembers to check.
+#
+#   army bots create examples/nightshift/bots/python-eol.yaml \
+#       --config examples/nightshift/army.toml --activate
+#   army bots run --interval 60 --config examples/nightshift/army.toml
+#
+# The state path *is* the fleet. Everything a bot is — its charter, its
+# schedule, its budget, every question it has asked and every answer it was
+# given — is rows in this file. Point two shells at it and they drive the same
+# crew; delete it and the crew is gone. There is no other place anything lives,
+# which is why a bot survives the loop being killed mid-iteration.
+
+[army]
+state_path = "~/.omnigent/nightshift/army.db"
+
+# Where the bodies run. A bot's body is an ordinary Omnigent session, so this
+# is the same server the chat UI talks to — open one and you are looking at the
+# transcript, the tool calls and the files of a bot mid-thought.
+server_url = "http://127.0.0.1:6767"
+
+# Iterations in flight at once, across the whole crew. A limit on work against
+# a vendor subscription, not on rows: a bot parked on a question holds no seat,
+# no session and no process, so three unanswered questions cannot stall the
+# crew behind them.
+max_concurrent_runs = 3
+
+# Per-vendor admission control. Two bots on one subscription queue rather than
+# race, and a vendor that refuses on quota cools its own lane instead of taking
+# the crew down with it.
+[lanes]
+claude-native = 2
+codex-native = 1
+
+[bots]
+# Which workloads this deployment will load. A bot names a dotted path and the
+# registry decides whether to import it — a fleet definition is data somebody
+# might paste from a chat window, and "import whatever it says" is not a thing
+# to do with data. Especially here, where a bot can propose another bot.
+allow_workloads = [
+    "army.bots.workloads.watch:WatchWorkload",
+    "army.bots.workloads.research:ResearchWorkload",
+]

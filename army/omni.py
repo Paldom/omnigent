@@ -175,6 +175,9 @@ class OmniClient:
         self.token = token
         self.timeout = timeout
         self.default_labels = dict(default_labels or {})
+        #: The host answered by :meth:`default_host`, remembered so filling in
+        #: a missing one costs a request per client rather than per session.
+        self._host: str | None = None
 
     def with_labels(self, labels: dict[str, str]) -> OmniClient:
         """
@@ -189,12 +192,14 @@ class OmniClient:
         :param labels: Labels to merge into every ``create_session``.
         :returns: A client sharing this one's connection settings.
         """
-        return OmniClient(
+        clone = OmniClient(
             self.base_url,
             self.token,
             self.timeout,
             default_labels={**self.default_labels, **labels},
         )
+        clone._host = self._host
+        return clone
 
     def _request(
         self,
@@ -264,10 +269,13 @@ class OmniClient:
 
         :returns: A host id, or ``None`` when no host is online.
         """
+        if self._host is not None:
+            return self._host
         hosts = self._request("GET", "/v1/hosts").get("hosts") or []
         for host in hosts:
             if host.get("status") == "online":
-                return str(host["host_id"])
+                self._host = str(host["host_id"])
+                return self._host
         return None
 
     def resolve_agent(self, name_or_id: str) -> str:
@@ -312,9 +320,11 @@ class OmniClient:
             server validates — a plain ``harness`` key is accepted and ignored,
             so the session silently runs on the spec's harness instead.
         :param workspace: Working directory for the session, e.g. a worktree.
-        :param host_id: Host to pin the session to. Without one no runner is
-            bound, and every message to the session is refused with
-            ``runner_unavailable`` — so an unattended loop needs this set.
+        :param host_id: Host to pin the session to. ``None`` takes the first
+            online host, which is right for the single-box deployment this is
+            built for and saves every bot definition carrying an id that is
+            only valid on one machine. Name one explicitly when there is more
+            than one host.
         :param labels: Session labels. ``omnigent.browser.profile`` is the one
             that matters here: its presence is what routes this session's
             ``browser_*`` actions to the server-owned browser gateway instead
@@ -332,8 +342,15 @@ class OmniClient:
             body["harness_override"] = harness
         if workspace is not None:
             body["workspace"] = workspace
-        if host_id is not None:
-            body["host_id"] = host_id
+        # A session with no host gets no runner, and every message to it is
+        # refused with `runner_failed_to_start` — which reads like a broken
+        # harness rather than a missing field. `default_host` existed and only
+        # a demo workload called it, so every bot definition had to carry a
+        # machine-specific id or fail this way. Filled in here, at the one call
+        # every workload goes through, so none of them can forget.
+        host = host_id if host_id is not None else self.default_host()
+        if host is not None:
+            body["host_id"] = host
         response = self._request("POST", "/v1/sessions", body)
         return str(response["id"])
 

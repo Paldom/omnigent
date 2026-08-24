@@ -107,6 +107,14 @@ class WatchWorkload:
         :param omni: The Omnigent client.
         :returns: The session id.
         """
+        # The server refuses to open a session on a directory that is not
+        # there, and the refusal names the host rather than the bot — so a
+        # fresh clone of an example fails with "workspace path does not exist
+        # on host" one layer below anything the operator wrote. This workload
+        # already creates `reports/` and its own state file inside here; the
+        # directory itself is no different.
+        self.workspace.mkdir(parents=True, exist_ok=True)
+
         # No browser label here. The supervisor puts the bot's own profile on
         # every session it opens, so this workload cannot get it wrong and the
         # next one cannot forget it — which is exactly what happened to the

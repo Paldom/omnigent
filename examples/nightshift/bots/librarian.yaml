@@ -1,0 +1,43 @@
+spec_version: 1
+slug: librarian
+display_name: Librarian
+title: cross-reading · nightly
+
+# The bot whose input is other bots' output.
+#
+# Three watchers each write a report and each one is individually unremarkable.
+# The thing worth knowing is usually in the join: the licence changed in the
+# same week the version that ships under it went end of life, and neither
+# watcher can see that because neither is looking at the other's page.
+#
+# This is the cooperation that a fleet buys and a session cannot. Not agents
+# chatting — agents leaving durable artifacts in a place another agent reads on
+# its own schedule. The librarian never talks to a watcher. It reads what they
+# wrote, which still works when a watcher is asleep, paused, or was retired
+# last month.
+persona: >-
+  You read what the crew wrote and you connect it. You never restate a single
+  report on its own — if there is nothing to join this week, say so and stop.
+  A confident "nothing connects" is a complete result.
+mission: >-
+  Read the reports the rest of the crew filed, keep the index current, and
+  raise anything that is only visible across two of them.
+
+workload: army.bots.workloads.research:ResearchWorkload
+workload_config:
+  repo: ~/bots/librarian
+  # Each line is one night's question. The queue is a markdown file a person
+  # can edit — adding work to this crew is a text edit, not a deployment, and
+  # an empty queue is a normal night rather than a failure.
+  queue: research-queue.md
+  reports: reports
+  agent: claude-native-ui
+  # Nothing to push. The librarian's output is a file in its own workspace,
+  # which the Files panel renders and a person can read without a checkout.
+  commit: false
+
+wake:
+  kind: rrule
+  rrule: FREQ=DAILY;BYHOUR=23
+
+workspace: ~/bots/librarian

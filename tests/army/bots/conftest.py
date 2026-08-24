@@ -44,6 +44,8 @@ class FakeOmni:
         self.default_labels: dict[str, str] = {}
         #: Every ``create_session`` call's labels, in order.
         self.labelled: list[dict[str, str]] = []
+        #: Every ``create_session`` call's host, in order.
+        self.hosts: list[str | None] = []
 
     def with_labels(self, labels: dict[str, str]) -> FakeOmni:
         self.default_labels = {**self.default_labels, **labels}
@@ -53,6 +55,9 @@ class FakeOmni:
         session_id = f"conv_{len(self.sessions):032d}"
         self.sessions.append(session_id)
         self.labelled.append({**self.default_labels, **(kwargs.get("labels") or {})})
+        #: What each session was pinned to. A session with no host gets no
+        #: runner and fails in a way that reads like a broken harness.
+        self.hosts.append(kwargs.get("host_id"))
         return session_id
 
     def send(self, session_id: str, text: str) -> None:

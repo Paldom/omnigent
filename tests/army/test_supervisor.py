@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from army.lanes import Lane, Lanes, limit_phrase_in
-from army.omni import OmniError
+from army.omni import OmniClient, OmniError
 from army.state import Command, CommandKind, IllegalTransition, Run, RunState
 from army.store import ConcurrentTransition, Store
 from army.supervisor import MAX_ATTEMPTS, STALL_SECONDS, Supervisor
@@ -927,3 +927,42 @@ def test_a_failed_session_is_not_collected_as_finished_work() -> None:
     assert _still_working("some-status-added-next-week") is True
     assert _still_working("idle") is False
     assert _still_working("failed") is False
+
+
+def test_a_session_gets_a_host_without_every_definition_naming_one() -> None:
+    """A session with no host gets no runner, and says `runner_failed_to_start`.
+
+    Which reads like a broken harness rather than a missing field. `default_host`
+    existed and only a demo workload called it, so a bot definition that did not
+    carry a machine-specific id failed this way — silently, one layer down, in a
+    session the operator has to go and open to see at all.
+
+    Filled in at ``create_session`` because that is the one call every workload
+    makes. An example other people copy cannot hardcode the id of the machine it
+    was written on.
+    """
+    asked: list[dict] = []
+
+    class Recording(OmniClient):
+        def _request(self, method: str, path: str, body: dict | None = None) -> object:
+            if path == "/v1/hosts":
+                return {"hosts": [{"host_id": "host-1", "status": "online"}]}
+            asked.append({"path": path, "body": body})
+            return {"id": "conv_1"}
+
+    client = Recording("http://x")
+    client.create_session("agent-1", title="watch: something")
+
+    assert asked[0]["body"]["host_id"] == "host-1"
+
+
+def test_an_explicit_host_still_wins() -> None:
+    """One box is the common case, not the only one."""
+
+    class Recording(OmniClient):
+        def _request(self, method: str, path: str, body: dict | None = None) -> object:
+            if path == "/v1/hosts":
+                raise AssertionError("must not look up a host it was given")
+            return {"id": "conv_1"}
+
+    Recording("http://x").create_session("agent-1", host_id="host-chosen")
