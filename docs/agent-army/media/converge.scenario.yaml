@@ -1,0 +1,96 @@
+# Driven by real clicks rather than a timed script, so the recording cannot
+# drift out of sync with the mockup.
+schema: 1
+name: omnigent-converge
+url: http://localhost:8877/?static=1
+viewport: { width: 1440, height: 900 }
+theme: glass
+output:
+  scale: 1
+  fps: 30
+  gif: { width: 1000, fps: 12 }
+
+steps:
+  - card:
+      style: hero
+      title: "Converge"
+      body: "Three agents finished in three worktrees. Today you drop to a terminal to compare and integrate them. This is the step no issue claims."
+      duration: 3.8
+
+  # ── Select ──────────────────────────────────────────────────────────────
+  - ring: "#sessions"
+  - move: { to: ".srow[data-s='1']", duration: 0.8 }
+  - card:
+      title: "Whatever produced them"
+      body: "Sessions you started by hand today, panes from #888 tomorrow, or a sub-agent fan-out. Converge is agnostic about where they came from — it only needs a shared base repo."
+      at: "#sessions"
+      side: right
+      duration: 4.2
+  - click: ".srow[data-s='1']"
+  - wait: 0.4
+  - click: ".srow[data-s='2']"
+  - wait: 0.4
+  - click: ".srow[data-s='3']"
+  - ring: hide
+  - wait: 0.6
+  - move: { to: "#convergeBtn", duration: 0.7 }
+  - card:
+      title: "Three different tasks, one repo"
+      body: "Rate limiting on Claude, a session export API on Codex, a flaky-test fix on Cursor. Each in its own git worktree, so none of them could collide while running."
+      at: "#convergeBtn"
+      side: right
+      duration: 4.2
+  - click: "#convergeBtn"
+  - wait: 1.6
+
+  # ── The matrix ──────────────────────────────────────────────────────────
+  - card:
+      title: "Files down, sessions across"
+      body: "One screen for what three agents did to one repo. No tab-switching, no terminal, no reconciling three diffs in your head."
+      at: ".foot"
+      side: bottom
+      duration: 4.0
+  - ring: "tr.ov"
+  - move: { to: "tr.ov", duration: 0.8 }
+  - card:
+      title: "Overlap is the signal"
+      body: "Two sessions both touched app.py and config.py. That is where a merge will actually hurt — and it is the one thing git cannot tell you, because git does not know which agent produced which change."
+      at: ".foot"
+      side: bottom
+      duration: 4.6
+  - ring: hide
+
+  # ── Provenance ──────────────────────────────────────────────────────────
+  - ring: "#col3"
+  - move: { to: "#col3", duration: 0.8 }
+  - card:
+      title: "Provenance, not just a diff"
+      body: "Each column carries its harness, cost, duration and test status. Cursor's run is the cheapest and the fastest — and its tests are red. Without this it really would be “git with a UI”."
+      at: ".foot"
+      side: bottom
+      duration: 4.6
+  - ring: hide
+
+  # ── Promote ─────────────────────────────────────────────────────────────
+  - move: { to: ".promote[data-p='2']", duration: 0.8 }
+  - card:
+      title: "One action"
+      body: "Promote merges that worktree into main, archives the session, and clears its occupancy warning. Per-file take is the only finer granularity."
+      at: ".foot"
+      side: bottom
+      duration: 4.0
+  - click: ".promote[data-p='2']"
+  - wait: 1.2
+  - move: { to: [900, 700], duration: 0.7 }
+  - card:
+      title: "And it stops there"
+      body: "No hunk-level three-way merge — that is six months of building a worse Meld. The escape hatch is opening the winner in your editor."
+      at: ".done"
+      side: top
+      duration: 4.2
+
+  - card:
+      style: hero
+      title: "Completes three features instead of competing with one"
+      body: "#888 shows sessions running. #3874 groups them. #382 scores harnesses offline. Converge is the step after all of them — and every primitive it needs already ships."
+      duration: 4.2

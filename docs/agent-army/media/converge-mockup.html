@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en" class="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Omnigent — Converge</title>
+    <style>
+      /* ── Tokens lifted from omnigent web/src/index.css (light theme) ─────── */
+      :root {
+        --background: #fff;
+        --foreground: #27272a;
+        --foreground-tertiary: #a1a1aa;
+        --card: #fff;
+        --primary: #11171c;
+        --primary-foreground: #fff;
+        --muted: #0000000f;
+        --muted-foreground: #71717a;
+        --accent: #d7edfe;
+        --border: #e4e4e7;
+        --border-weak: #efeff1;
+        --brand-accent: #df3c85;
+        --status-blue: #3b8ff5;
+        --status-green: #2ea65c;
+        --status-yellow: #d4972a;
+        --status-red: #f04858;
+        --status-gray: #8e99a4;
+        --sidebar-active: rgba(240, 1, 150, 0.1);
+        --sidebar-active-foreground: #651249;
+        --radius-otto-button: 6px;
+        --radius-otto-sm: 8px;
+        --radius-otto-md: 12px;
+        --ease-otto: cubic-bezier(0.34, 1.4, 0.64, 1);
+        --duration-otto-fast: 180ms;
+        --shadow-xs: 0 2px 8px rgb(24 24 27 / 0.04);
+        --shadow-sm: 0 4px 10px -6px rgb(24 24 27 / 0.09);
+        --shadow-lg: 0 6px 20px -4px rgb(24 24 27 / 0.12);
+        --shadow-xl: 0 12px 44px rgb(60 40 30 / 0.16);
+        --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+
+      ::selection { background: rgba(223, 60, 133, 0.18); color: var(--foreground); }
+      :root { caret-color: var(--brand-accent); accent-color: var(--brand-accent); }
+      * { scrollbar-width: thin; scrollbar-color: #d8d8dd transparent; }
+      *::-webkit-scrollbar { width: 10px; height: 10px; }
+      *::-webkit-scrollbar-thumb {
+        background: #d8d8dd; border-radius: 999px;
+        border: 3px solid var(--background); background-clip: padding-box;
+      }
+      *::-webkit-scrollbar-track { background: transparent; }
+      :focus-visible { outline: 2px solid var(--brand-accent); outline-offset: 2px; border-radius: var(--radius-otto-button); }
+
+      html, body { height: 100%; }
+      body {
+        font-family: var(--font-sans); color: var(--foreground); background: var(--background);
+        font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased;
+      }
+      .app-shell { display: flex; height: 100vh; overflow: hidden; }
+
+      /* ── Sidebar ─────────────────────────────────────────────────────────── */
+      .conversations-sidebar {
+        width: 252px; flex: none; display: flex; flex-direction: column;
+        background: linear-gradient(to right, #fffefe, #fcf6fa);
+        border-right: 1px solid var(--border-weak); padding: 14px 10px 8px;
+      }
+      .brandbar { display: flex; align-items: center; gap: 6px; padding: 0 6px 14px; }
+      .wordmark { font-size: 15px; font-weight: 650; letter-spacing: -0.02em; margin-right: auto; }
+      .iconbtn {
+        display: grid; place-items: center; width: 26px; height: 26px; border: 0;
+        background: transparent; color: var(--muted-foreground);
+        border-radius: var(--radius-otto-button); cursor: pointer;
+        transition: background 150ms ease-out, color 150ms ease-out;
+      }
+      .iconbtn:hover { background: var(--muted); color: var(--foreground); }
+      .navlist { display: flex; flex-direction: column; gap: 1px; margin-bottom: 14px; }
+      .navitem {
+        display: flex; align-items: center; gap: 9px; padding: 6px 8px;
+        border-radius: var(--radius-otto-button); color: var(--foreground);
+        text-decoration: none; font-size: 13.5px;
+      }
+      .navitem:hover { background: var(--muted); }
+      .grouphead {
+        display: flex; align-items: center; gap: 6px; padding: 4px 8px;
+        font-size: 11.5px; font-weight: 600; color: var(--muted-foreground);
+      }
+      .grouphead .iconbtn { margin-left: auto; width: 22px; height: 22px; }
+      .sessions { display: flex; flex-direction: column; gap: 1px; overflow-y: auto; flex: 1; }
+      .srow {
+        display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+        border-radius: var(--radius-otto-button); cursor: pointer; position: relative;
+        font-size: 13.5px; transition: background 150ms ease-out;
+      }
+      .srow:hover { background: var(--muted); }
+      .srow .title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .srow .dot { margin-left: auto; width: 6px; height: 6px; border-radius: 999px; flex: none; }
+      .chk {
+        width: 15px; height: 15px; border-radius: 4px; border: 1.5px solid #c9c9d0; flex: none;
+        display: grid; place-items: center; transition: all var(--duration-otto-fast) var(--ease-otto);
+      }
+      .srow.sel .chk { background: var(--brand-accent); border-color: var(--brand-accent); }
+      .srow.sel .chk svg { opacity: 1; transform: scale(1); }
+      .chk svg { opacity: 0; transform: scale(0.5); transition: all var(--duration-otto-fast) var(--ease-otto); }
+      .srow.sel { background: var(--sidebar-active); }
+      .hostline {
+        display: flex; align-items: center; gap: 7px; padding: 9px 8px 2px;
+        font-size: 11.5px; color: var(--muted-foreground);
+        border-top: 1px solid var(--border-weak); margin-top: 6px;
+      }
+      .hostline .dot { width: 6px; height: 6px; border-radius: 999px; background: var(--status-green); }
+
+      /* Selection action bar */
+      .selbar {
+        margin: 8px 4px 0; padding: 9px 10px; border-radius: var(--radius-otto-sm);
+        background: var(--card); border: 1px solid var(--border); box-shadow: var(--shadow-sm);
+        opacity: 0; transform: translateY(6px);
+        transition: opacity 200ms ease-out, transform 240ms var(--ease-otto);
+      }
+      body.has-sel .selbar { opacity: 1; transform: none; pointer-events: auto; }
+      .selbar { pointer-events: auto; }
+      .selbar .n { font-size: 12px; color: var(--muted-foreground); margin-bottom: 7px; }
+      .selbar .n b { color: var(--foreground); font-weight: 600; }
+      .btn {
+        font: inherit; font-size: 12.5px; font-weight: 550; padding: 6px 11px;
+        border-radius: var(--radius-otto-button); cursor: pointer; border: 1px solid transparent;
+        display: inline-flex; align-items: center; gap: 6px; width: 100%; justify-content: center;
+        transition: background 150ms ease-out;
+      }
+      .btn.primary { background: var(--primary); color: var(--primary-foreground); }
+      .btn.primary:hover { background: #000; }
+      .btn.ghost { background: transparent; border-color: var(--border); color: var(--foreground); width: auto; }
+      .btn.ghost:hover { background: var(--muted); }
+
+      /* ── Main ────────────────────────────────────────────────────────────── */
+      .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+      .topbar {
+        display: flex; align-items: center; gap: 10px; padding: 12px 18px;
+        border-bottom: 1px solid var(--border-weak);
+      }
+      .topbar h1 { font-size: 14px; font-weight: 550; letter-spacing: -0.01em; }
+      .basepill {
+        font-family: var(--font-mono); font-size: 11.5px; color: var(--muted-foreground);
+        background: var(--muted); padding: 2px 8px; border-radius: 5px;
+      }
+      .topbar .spacer { flex: 1; }
+
+      .stage { flex: 1; overflow: auto; padding: 20px 18px 26px; }
+
+      /* Empty state, before a selection */
+      .empty {
+        max-width: 460px; margin: 96px auto; text-align: center; color: var(--muted-foreground);
+      }
+      .empty h2 { font-size: 15px; color: var(--foreground); font-weight: 600; margin-bottom: 6px; }
+      .empty p { font-size: 13.5px; line-height: 1.6; }
+      body.has-sel .empty { display: none; }
+
+      /* ── The matrix ──────────────────────────────────────────────────────── */
+      .converge {
+        opacity: 0; transform: translateY(8px); pointer-events: none;
+        transition: opacity 260ms ease-out, transform 300ms var(--ease-otto);
+      }
+      body.converged .converge { opacity: 1; transform: none; pointer-events: auto; }
+      body.converged .empty { display: none; }
+
+      .summary { display: flex; align-items: baseline; gap: 14px; margin-bottom: 14px; }
+      .summary h2 { font-size: 17px; font-weight: 600; letter-spacing: -0.015em; }
+      .summary .sub { font-size: 12.5px; color: var(--muted-foreground); }
+      .summary .warn { color: #8a6115; font-weight: 550; }
+
+      table.mx { border-collapse: separate; border-spacing: 0; width: 100%; }
+      table.mx th, table.mx td { text-align: left; }
+
+      /* Session column headers */
+      .colhead {
+        vertical-align: bottom; padding: 0 0 10px 10px; width: 200px;
+      }
+      .colcard {
+        border: 1px solid var(--border); border-radius: var(--radius-otto-sm);
+        background: var(--card); padding: 9px 10px; box-shadow: var(--shadow-xs);
+        transition: box-shadow 200ms ease-out, border-color 200ms ease-out;
+      }
+      .colcard.win { border-color: var(--status-green); box-shadow: 0 0 0 1px var(--status-green), var(--shadow-sm); }
+      .colcard .h {
+        display: inline-flex; align-items: center; gap: 5px; font-family: var(--font-mono);
+        font-size: 10.5px; font-weight: 500; padding: 2px 7px; border-radius: 5px; margin-bottom: 6px;
+      }
+      .h.claude { background: rgba(223, 60, 133, 0.12); color: #a32562; }
+      .h.codex { background: rgba(59, 143, 245, 0.13); color: #1c5fae; }
+      .h.cursor { background: rgba(142, 153, 164, 0.18); color: #4c5763; }
+      .colcard .nm {
+        font-size: 13px; font-weight: 550; white-space: nowrap; overflow: hidden;
+        text-overflow: ellipsis; margin-bottom: 5px;
+      }
+      .meta { display: flex; align-items: center; gap: 9px; font-size: 11px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+      .meta .ok, .meta .bad { display: inline-flex; align-items: center; gap: 3px; }
+      .meta .ok { color: var(--status-green); font-weight: 600; }
+      .meta .bad { color: var(--status-red); font-weight: 600; }
+      .promote { margin-top: 8px; }
+
+      /* File rows */
+      .fh {
+        padding: 6px 10px 6px 0; font-size: 11px; font-weight: 600;
+        color: var(--muted-foreground); text-transform: none;
+      }
+      td.f {
+        padding: 0 10px 0 0; border-top: 1px solid var(--border-weak);
+        font-family: var(--font-mono); font-size: 12px; white-space: nowrap;
+        max-width: 300px; overflow: hidden; text-overflow: ellipsis; direction: rtl;
+      }
+      td.f span { direction: ltr; unicode-bidi: embed; }
+      tr.row td { height: 34px; }
+      tr.row:hover td { background: rgba(0, 0, 0, 0.016); }
+
+      /* Overlap: the signal git cannot give you */
+      tr.ov td.f { position: relative; }
+      tr.ov td.f::before {
+        content: ""; position: absolute; left: -10px; top: 6px; bottom: 6px; width: 2px;
+        background: var(--status-yellow); border-radius: 999px;
+        opacity: 0; transition: opacity 240ms ease-out;
+      }
+      body.showov tr.ov td.f::before { opacity: 1; }
+      body.showov tr.ov td { background: rgba(212, 151, 42, 0.055); }
+      body.showov tr.ov:hover td { background: rgba(212, 151, 42, 0.085); }
+
+      td.c {
+        padding: 0 0 0 10px; border-top: 1px solid var(--border-weak);
+        font-size: 12px; font-variant-numeric: tabular-nums;
+      }
+      .cell {
+        display: flex; align-items: center; gap: 8px; height: 100%;
+        padding: 0 9px; border-radius: var(--radius-otto-button);
+      }
+      .cell.has { background: rgba(0, 0, 0, 0.028); }
+      .add { color: var(--status-green); font-weight: 550; }
+      .del { color: var(--status-red); font-weight: 550; }
+      .none { color: var(--foreground-tertiary); }
+      .take {
+        margin-left: auto; font-size: 10.5px; padding: 1px 6px; border-radius: 4px;
+        border: 1px solid var(--border); color: var(--muted-foreground);
+        background: var(--background); opacity: 0; transition: opacity 140ms ease-out;
+      }
+      tr.row:hover .cell.has .take { opacity: 1; }
+
+      /* Footer summary */
+      .foot {
+        margin-top: 16px; padding-top: 13px; border-top: 1px solid var(--border-weak);
+        display: flex; align-items: center; gap: 12px; font-size: 12.5px; color: var(--muted-foreground);
+      }
+      .foot .k { display: inline-flex; align-items: center; gap: 6px; }
+      .foot .sw { width: 9px; height: 2px; border-radius: 999px; background: var(--status-yellow); }
+      .foot .spacer { flex: 1; }
+
+      /* Promote result */
+      .done {
+        display: none; margin-top: 16px; padding: 12px 14px; align-items: center; gap: 11px;
+        border: 1px solid rgba(46, 166, 92, 0.4); background: rgba(46, 166, 92, 0.06);
+        border-radius: var(--radius-otto-sm);
+      }
+      body.promoted .done { display: flex; }
+      .done .t { font-size: 13px; flex: 1; }
+      .done .t b { font-weight: 600; }
+      .done .t span { color: var(--muted-foreground); }
+
+      body.promoted .colcard:not(.win) { opacity: 0.4; }
+      body.promoted td.c.lose .cell { opacity: 0.32; }
+
+      @media (prefers-reduced-motion: reduce) {
+        * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="conversations-sidebar">
+        <div class="brandbar">
+          <span class="wordmark">Omnigent</span>
+          <button class="iconbtn" aria-label="Search"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg></button>
+          <button class="iconbtn" aria-label="Settings"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg></button>
+        </div>
+
+        <nav class="navlist">
+          <a class="navitem" href="#"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>New session</a>
+          <a class="navitem" href="#"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Automations</a>
+          <a class="navitem" href="#"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 5h16v9a2 2 0 0 1-2 2h-3l-3 3-3-3H6a2 2 0 0 1-2-2Z"/></svg>Inbox</a>
+        </nav>
+
+        <div class="grouphead">
+          Sessions
+          <button class="iconbtn" aria-label="Select sessions"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 11l2 2 4-4"/><rect x="3" y="3" width="18" height="18" rx="3"/></svg></button>
+        </div>
+
+        <div class="sessions" id="sessions">
+          <div class="srow" data-s="1"><span class="chk"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round"><path d="m4 12 5 5L20 6"/></svg></span><span class="title">rate limiting</span><span class="dot" style="background:var(--status-green)"></span></div>
+          <div class="srow" data-s="2"><span class="chk"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round"><path d="m4 12 5 5L20 6"/></svg></span><span class="title">session export API</span><span class="dot" style="background:var(--status-green)"></span></div>
+          <div class="srow" data-s="3"><span class="chk"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round"><path d="m4 12 5 5L20 6"/></svg></span><span class="title">fix the flaky e2e</span><span class="dot" style="background:var(--status-green)"></span></div>
+          <div class="srow" data-s="4"><span class="chk"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round"><path d="m4 12 5 5L20 6"/></svg></span><span class="title">docs — harness matrix</span><span class="dot" style="background:var(--status-blue)"></span></div>
+          <div class="srow" data-s="5"><span class="chk"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round"><path d="m4 12 5 5L20 6"/></svg></span><span class="title">Movie night snack selection</span></div>
+          <div class="srow" data-s="6"><span class="chk"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round"><path d="m4 12 5 5L20 6"/></svg></span><span class="title">benchmark triage</span></div>
+        </div>
+
+        <div class="selbar" id="selbar">
+          <div class="n"><b id="selN">3 sessions</b> selected · one repo</div>
+          <button class="btn primary" id="convergeBtn">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4v5a3 3 0 0 0 3 3h8M19 4v5a3 3 0 0 1-3 3H8"/><path d="m13 16 3-4-3-4"/></svg>
+            Converge
+          </button>
+        </div>
+
+        <div class="hostline"><span class="dot"></span> HUL-0095.local</div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <h1 id="stageTitle">Converge</h1>
+          <span class="basepill" id="basePill">base: main</span>
+          <div class="spacer"></div>
+          <button class="btn ghost"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M7 12h10M10 18h4"/></svg>Filter</button>
+        </header>
+
+        <div class="stage">
+          <div class="empty">
+            <h2>Nothing selected</h2>
+            <p>Select two or more finished sessions that share a base repo, then converge them to compare what each one changed and promote a winner.</p>
+          </div>
+
+          <div class="converge" id="converge">
+            <div class="summary">
+              <h2>3 sessions · 8 files</h2>
+              <span class="sub">omnigent · base <b>main</b> · <span class="warn" id="ovCount">2 files overlap</span></span>
+            </div>
+
+            <table class="mx">
+              <thead>
+                <tr>
+                  <th class="fh">File</th>
+                  <th class="colhead">
+                    <div class="colcard" id="col1">
+                      <span class="h claude">claude-native</span>
+                      <div class="nm">rate limiting</div>
+                      <div class="meta"><span>$0.42</span><span>6m</span><span class="ok"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 12 5 5L20 6"/></svg>tests</span></div>
+                      <button class="btn primary promote" data-p="1">Promote</button>
+                    </div>
+                  </th>
+                  <th class="colhead">
+                    <div class="colcard" id="col2">
+                      <span class="h codex">codex</span>
+                      <div class="nm">session export API</div>
+                      <div class="meta"><span>$0.31</span><span>9m</span><span class="ok"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 12 5 5L20 6"/></svg>tests</span></div>
+                      <button class="btn primary promote" data-p="2">Promote</button>
+                    </div>
+                  </th>
+                  <th class="colhead">
+                    <div class="colcard" id="col3">
+                      <span class="h cursor">cursor</span>
+                      <div class="nm">fix the flaky e2e</div>
+                      <div class="meta"><span>$0.28</span><span>4m</span><span class="bad"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6 6 18"/></svg>tests</span></div>
+                      <button class="btn primary promote" data-p="3">Promote</button>
+                    </div>
+                  </th>
+                </tr>
+              </thead>
+              <tbody id="rows"></tbody>
+            </table>
+
+            <div class="foot">
+              <span class="k"><span class="sw"></span> touched by more than one session</span>
+              <span class="spacer"></span>
+              <span>Promote merges that worktree into <b>main</b> and archives the rest.</span>
+            </div>
+
+            <div class="done">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--status-green)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m4 12 5 5L20 6"/></svg>
+              <span class="t"><b id="doneName">Promoted session export API into main.</b>
+                <span id="doneSub">Worktree archived, occupancy cleared. 2 sessions left.</span></span>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      const $ = (s) => document.querySelector(s);
+      const body = document.body;
+
+      // files × sessions. `null` = untouched by that session.
+      const FILES = [
+        ["omnigent/server/middleware/ratelimit.py",     [[142, 0], null, null]],
+        ["omnigent/server/routes/exports.py",           [null, [96, 0], null]],
+        ["omnigent/server/app.py",                      [[9, 2], [7, 1], null]],
+        ["omnigent/server/config.py",                   [[11, 0], [4, 0], null]],
+        ["tests/server/test_ratelimit.py",              [[188, 0], null, null]],
+        ["tests/server/test_exports.py",                [null, [121, 0], null]],
+        ["tests/e2e_ui/conftest.py",                    [null, null, [12, 34]]],
+        ["docs/configuration.md",                       [[22, 1], null, null]],
+      ];
+
+      const overlapCount = FILES.filter(([, cells]) => cells.filter(Boolean).length > 1).length;
+      const rows = $("#rows");
+      $("#ovCount").textContent =
+        overlapCount + (overlapCount === 1 ? " file overlaps" : " files overlap");
+      FILES.forEach(([path, cells]) => {
+        const touched = cells.filter(Boolean).length;
+        const tr = document.createElement("tr");
+        tr.className = "row" + (touched > 1 ? " ov" : "");
+        const td = document.createElement("td");
+        td.className = "f";
+        td.innerHTML = `<span>${path}</span>`;
+        tr.appendChild(td);
+        cells.forEach((c, i) => {
+          const cell = document.createElement("td");
+          cell.className = "c s" + (i + 1);
+          cell.innerHTML = c
+            ? `<div class="cell has"><span class="add">+${c[0]}</span><span class="del">−${c[1]}</span><span class="take">take</span></div>`
+            : `<div class="cell"><span class="none">—</span></div>`;
+          tr.appendChild(cell);
+        });
+        rows.appendChild(tr);
+      });
+
+      const refresh = () => {
+        const n = document.querySelectorAll(".srow.sel").length;
+        body.classList.toggle("has-sel", n >= 2);
+        $("#selN").textContent = n + (n === 1 ? " session" : " sessions");
+      };
+      document.querySelectorAll(".srow").forEach((r) => {
+        r.addEventListener("click", () => { r.classList.toggle("sel"); refresh(); });
+      });
+
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+      $("#convergeBtn").addEventListener("click", () => {
+        body.classList.add("converged");
+        setTimeout(() => body.classList.add("showov"), 700);
+      });
+      document.querySelectorAll(".promote").forEach((b) => {
+        b.addEventListener("click", () => promote(b.dataset.p));
+      });
+
+      function promote(n) {
+        document.querySelectorAll(".colcard").forEach((c, i) => c.classList.toggle("win", String(i + 1) === n));
+        document.querySelectorAll("td.c").forEach((c) => c.classList.toggle("lose", !c.classList.contains("s" + n)));
+        $("#doneName").textContent =
+          "Promoted " + ["rate limiting", "session export API", "fix the flaky e2e"][n - 1] + " into main.";
+        body.classList.add("promoted");
+      }
+
+      // ── Scripted demo ──────────────────────────────────────────────────────
+      async function demo() {
+        await sleep(900);
+        for (const id of ["1", "2", "3"]) {
+          document.querySelector(`.srow[data-s="${id}"]`).classList.add("sel");
+          refresh();
+          await sleep(520);
+        }
+        await sleep(900);
+        $("#convergeBtn").click();
+        await sleep(6200);
+        promote("2");
+      }
+      if (!location.search.includes("static")) demo();
+      window.converge = { demo, promote };
+    </script>
+  </body>
+</html>
