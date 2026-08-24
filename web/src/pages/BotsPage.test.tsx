@@ -886,4 +886,59 @@ describe("BotsPage", () => {
     renderPage();
     expect(await screen.findByText(/budget exhausted/)).toBeInTheDocument();
   });
+
+  it("stays on the bot whose wheel you just took", async () => {
+    // Clearing the selection exists because a *decided* row leaves the roster.
+    // The wheel decides nothing, and clearing there handed you back to the
+    // auto-select effect — which picks the most consequential bot, not the one
+    // you were working with. Taking control of a browser and being navigated
+    // away from it in the same click is a special kind of rude.
+    //
+    // `scout` is what auto-select picks, so the test drives `other`: if the
+    // selection is cleared, the page silently jumps back to `scout`.
+    listBots.mockResolvedValue(
+      fleet({
+        bots: [
+          bot("scout", { status: "waiting_human", needsHuman: true }),
+          bot("other", { status: "waiting_human", needsHuman: true }),
+        ],
+      }),
+    );
+    getBot.mockImplementation((slug: string) =>
+      Promise.resolve({ ...detail({ pending: [] }), slug }),
+    );
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /other/ }));
+    await screen.findByPlaceholderText(/Say something to other/);
+    fireEvent.click(await screen.findByRole("button", { name: "Screen" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Take the wheel" }));
+
+    await waitFor(() => expect(setWheel).toHaveBeenCalled());
+    expect(setWheel.mock.calls[0][0]).toEqual({ bot: "other", take: true });
+    expect(await screen.findByPlaceholderText(/Say something to other/)).toBeInTheDocument();
+  });
+
+  it("stays on the bot you just spoke to", async () => {
+    listBots.mockResolvedValue(
+      fleet({
+        bots: [
+          bot("scout", { status: "waiting_human", needsHuman: true }),
+          bot("other", { status: "waiting_human", needsHuman: true }),
+        ],
+      }),
+    );
+    getBot.mockImplementation((slug: string) =>
+      Promise.resolve({ ...detail({ pending: [] }), slug }),
+    );
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /other/ }));
+    const box = await screen.findByPlaceholderText(/Say something to other/);
+    fireEvent.change(box, { target: { value: "check the other table too" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(sayToBot).toHaveBeenCalled());
+    expect(await screen.findByPlaceholderText(/Say something to other/)).toBeInTheDocument();
+  });
 });

@@ -245,7 +245,10 @@ function ApprovalCard({
 }) {
   const evidence = Object.entries(approval.evidence ?? {});
   return (
-    <section className="mb-2 grid grid-cols-[auto_1fr] gap-x-2 rounded-otto-sm border border-border bg-card px-2.5 py-2">
+    <section
+      data-testid="approval"
+      className="mb-2 grid grid-cols-[auto_1fr] gap-x-2 rounded-otto-sm border border-border bg-card px-2.5 py-2"
+    >
       <span
         aria-hidden
         className={cn(DISC_FIRST_LINE, "size-2 shrink-0 rounded-full bg-[var(--status-yellow)]")}
@@ -925,6 +928,7 @@ function Screen({
           {shot?.url || "no page open"}
         </span>
         <Button
+          data-testid="wheel"
           size="sm"
           variant={driver ? "default" : "outline"}
           disabled={busy}
@@ -961,7 +965,7 @@ function Screen({
             clicked through four. Newest first — that is the one being asked
             about. */}
         {shot?.trail && shot.trail.length > 0 && (
-          <ol className="mt-2 rounded-otto-sm border border-border bg-card">
+          <ol data-testid="trail" className="mt-2 rounded-otto-sm border border-border bg-card">
             {[...shot.trail].reverse().map((step, index) => (
               <li
                 key={`${shot.trail!.length - index}-${step.action}`}
@@ -1015,7 +1019,10 @@ function Dock({
     // `h-11` matches the roster and channel headers, so the three columns
     // share one horizontal rule instead of three that nearly line up.
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex h-11 shrink-0 items-center gap-1 border-b border-border px-3">
+      <div
+        data-testid="dock"
+        className="flex h-11 shrink-0 items-center gap-1 border-b border-border px-3"
+      >
         {DOCK_TABS.map((entry) => (
           <button
             key={entry.value}
@@ -1190,11 +1197,26 @@ export function BotsPage() {
     if (loaded && stale) setSelection(null);
   }, [loaded, stale]);
 
-  async function run(action: () => Promise<{ ok: boolean; reason?: string }>, fallback: string) {
+  /**
+   * Run an action, surface its refusal, and clear the selection only if the
+   * action *decided* something.
+   *
+   * Clearing exists because a decided row leaves the roster, so a selection
+   * pointing at it would render an empty column. Taking the wheel and saying
+   * something decide nothing — and clearing there yanked you off the bot you
+   * were working with, straight to whichever one the auto-select effect
+   * thought was most consequential. Taking control of a browser and being
+   * navigated away from it in the same click is a special kind of rude.
+   */
+  async function run(
+    action: () => Promise<{ ok: boolean; reason?: string }>,
+    fallback: string,
+    { decided = false }: { decided?: boolean } = {},
+  ) {
     setRefusal(null);
     const result = await action();
     if (!result.ok) setRefusal(result.reason ?? fallback);
-    else setSelection(null);
+    else if (decided) setSelection(null);
   }
 
   async function handleAnswer(approval: BotApproval, choice: string, approved: boolean) {
@@ -1282,7 +1304,9 @@ export function BotsPage() {
 
           {needsYou.length > 0 && (
             <>
-              <p className="px-2 pt-2.5 pb-1 text-muted-foreground text-sm">Needs you</p>
+              <p data-testid="needs-you" className="px-2 pt-2.5 pb-1 text-muted-foreground text-sm">
+                Needs you
+              </p>
               {needsYou.map((bot) => (
                 <RosterRow
                   key={bot.slug}
@@ -1396,6 +1420,7 @@ export function BotsPage() {
                   void run(
                     () => adopt.mutateAsync({ spawn: draft.id, decision }),
                     "The proposal was not decided.",
+                    { decided: true },
                   )
                 }
               />
@@ -1420,6 +1445,7 @@ export function BotsPage() {
                           confirmed: approved,
                         }),
                       "The signature was refused.",
+                      { decided: true },
                     )
                   }
                 />

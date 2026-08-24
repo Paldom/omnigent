@@ -1,0 +1,146 @@
+# Bot mode — the walkthrough.
+#
+# Films the nightshift crew (examples/nightshift) against a live Omnigent dev
+# server. Everything on screen is real: real bots on real schedules, a real
+# Chromium the bot drove, a real question waiting on a person.
+#
+# Record with:
+#   node "<skill>/scripts/record.mjs" examples/nightshift/walkthrough.yaml --out ./walkthrough-out
+#
+# Prerequisites, because this films live state rather than a fixture:
+#   - omnigent server on :6767, web dev server on :5203
+#   - army bots serve --config examples/nightshift/army.toml
+#   - status-watch parked on a question, with a page open in its own browser
+schema: 1
+name: bot-mode
+url: http://localhost:5203/bots
+viewport: { width: 1440, height: 900 }
+theme: glass
+output:
+  fps: 30
+  # scale 1, not the default 2. The 2x crispness pass sets `html { zoom }` on a
+  # doubled viewport, and this page stops re-rendering on query updates under
+  # it — the wheel button keeps its old label while the server has already
+  # changed hands. Sharpness is worth less than a beat that tells the truth.
+  scale: 1
+  gif: { width: 960, fps: 12 }
+
+steps:
+  - wait: { for: "text=Needs you", timeout: 20 }
+
+  - card:
+      style: hero
+      kicker: "Omnigent · Bot mode"
+      title: "Agents that outlive the session"
+      body: "A session ends when you close it. These don't. They wake on a schedule, remember what they saw last week, and only interrupt you when something changed."
+      duration: 3.6
+
+  # ── the roster ───────────────────────────────────────────────
+  - ring: "[data-testid=needs-you]"
+  - move: { to: "[data-testid=needs-you]" }
+  - card:
+      kicker: "The crew"
+      title: "Four bots, no session"
+      body: "Two need a person, two are asleep until their next wake. None of them is a running process — a bot is rows in a database, so killing the loop mid-iteration loses nothing."
+      at: "[data-testid=needs-you]"
+      side: right
+      duration: 4.0
+  - ring: hide
+
+  - click: "text=status-watch"
+  - wait: 1.2
+
+  # ── the question ─────────────────────────────────────────────
+  - zoom: { to: "[data-testid=approval]", scale: 1.25, duration: 1.0 }
+  - card:
+      kicker: "Human in the loop"
+      title: "It asks, then it waits"
+      body: "The question carries its evidence: the page, the verdict, the run. A bot parked here holds no vendor seat and no process — three unanswered questions cannot stall the crew behind them."
+      at: "[data-testid=approval]"
+      side: left
+      duration: 4.2
+  - zoom: { reset: true, duration: 0.9 }
+
+  # ── the live browser ─────────────────────────────────────────
+  - click: "button:has-text('Screen')"
+  - wait: 1.6
+  - card:
+      kicker: "Bot, meet browser"
+      title: "The page it actually drove"
+      body: "Not a screenshot taken beside a fetch — the same Chromium, with its own profile and cookies. One page, two viewers."
+      at: "[data-testid=wheel]"
+      side: left
+      duration: 4.0
+
+  - card:
+      kicker: "Audit"
+      title: "What it did, not just where it ended up"
+      body: "Every action it took, newest first. A picture alone cannot tell a bot that read one page from one that clicked through four."
+      at: "[data-testid=trail]"
+      side: left
+      duration: 3.8
+
+  # ── the wheel ────────────────────────────────────────────────
+  - move: { to: "[data-testid=wheel]" }
+  - click: "button:has-text('Take the wheel')"
+  # The label flips only once the roster refetches, so this waits on the button
+  # rather than on a stopwatch.
+  - wait: { for: "button:has-text('Hand back')", timeout: 15 }
+  - wait: 0.8
+  - card:
+      kicker: "Control handoff"
+      title: "Refused, not queued"
+      body: "While you drive, its actions are refused — including reads, because a snapshot taken while you type a password transcribes it. A queued click would land on a page you have already left."
+      at: "[data-testid=wheel]"
+      side: left
+      duration: 4.4
+
+  - click: "button:has-text('Hand back')"
+  - wait: { for: "button:has-text('Take the wheel')", timeout: 15 }
+  - wait: 0.8
+  - card:
+      kicker: "Control handoff"
+      title: "And it carries on"
+      body: "On the page you left it on. The profile is persistent, so a sign-in you complete is a session the bot keeps — which is how it asks for a person instead of asking for a password."
+      at: "[data-testid=wheel]"
+      side: left
+      duration: 4.0
+
+  # ── the workspace ────────────────────────────────────────────
+  - click: "button:has-text('Files')"
+  - wait: 1.4
+  - card:
+      kicker: "What it left behind"
+      title: "A workspace, not a transcript"
+      body: "Reports it wrote and the baseline it compares against. The baseline is the whole feature: without it, every morning is the first morning."
+      at: "[data-testid=dock]"
+      side: left
+      duration: 4.0
+
+  # ── reactions ────────────────────────────────────────────────
+  - click: "button:has-text('Runs')"
+  - wait: 1.2
+  - card:
+      kicker: "Every iteration"
+      title: "And the session behind each one"
+      body: "A bot's body is an ordinary Omnigent session. Open one and you are in the normal chat page — transcript, tool calls, terminals and all."
+      at: "[data-testid=dock]"
+      side: left
+      duration: 3.8
+
+  - move: { to: "[data-testid=marks]" }
+  - card:
+      kicker: "Not approve-or-deny"
+      title: "Acknowledgement that isn't permission"
+      body: "Seen, useful, unclear, uneasy — they reach the bot in its next brief. There is deliberately no tick: beside a pending question a tick reads as approved, and approval here binds to an action hash."
+      at: "[data-testid=marks]"
+      side: right
+      duration: 4.4
+
+  # ── outro ────────────────────────────────────────────────────
+  - card:
+      style: hero
+      kicker: "examples/nightshift"
+      title: "Long-running, not long-prompted"
+      body: "Loop engineering, a browser each, control you can take back, and bots that read each other's work. The crew was activated once — it has been running ever since."
+      duration: 3.6
