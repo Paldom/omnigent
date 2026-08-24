@@ -2,6 +2,12 @@
 
 A standing crew for the things nobody remembers to check.
 
+https://github.com/Paldom/omnigent/raw/feat/bot-mode/examples/nightshift/media/bot-mode.mp4
+
+*70 seconds: the roster, a bot's question, the browser it drove, taking the
+wheel, and acknowledgement that isn't permission. Filmed against this example —
+`walkthrough.yaml` is the scenario, and nothing in it is a fixture.*
+
 Every other example here is a **session**: you ask, it works, it answers, it
 ends. This one has no beginning. The crew was activated some week in the past
 and it is still going — waking on a schedule, reading pages it has read before,
@@ -115,9 +121,10 @@ deliberately no tick: beside a pending question a tick reads as *approved*, and
 an approval here binds a verdict to an action hash, a policy version and a run
 version. Nothing that does not may stand in for it.
 
-## Two things this example taught the code
+## What this example taught the code
 
-Both were found by running it on a machine that had never run it.
+Four bugs, all found by running it on a machine that had never run it, and by
+filming it.
 
 A bot definition used to need a **host id** — a uuid only valid on the box it
 was copied from — or its sessions got no runner and failed with
@@ -127,6 +134,17 @@ missing field. The client fills it in now.
 A bot's **workspace** had to already exist, or the session create failed with
 "workspace path does not exist on host", naming a host the operator never
 mentioned. The watcher creates the directory it was told to work in.
+
+**Taking the wheel navigated you off the bot you had just taken it from.** The
+page cleared its selection after every successful action — right for a verdict,
+which removes the row, wrong for the wheel, which decides nothing. Found while
+recording the walkthrough, because the button stubbornly kept the wrong label.
+
+And the librarian found one in this example's own files: `research-queue.md`
+shipped with an **uncommented prose header**, so the queue handed it the
+sentence "One question per line." as that night's work. It spent the iteration
+reporting that its brief was not a question — correct behaviour on malformed
+input, and a better bug report than most.
 
 An example is worth having partly because it is the first honest user.
 
