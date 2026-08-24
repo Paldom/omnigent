@@ -500,6 +500,15 @@ async def test_a_labelled_session_goes_to_the_gateway_not_the_desktop(
     performed: list[tuple[str, str, dict[str, Any]]] = []
 
     class _FakeGateway:
+        def resident(self) -> list[str]:
+            return ["bot-kraken-fee-watch"]
+
+        def driven_by_a_person(self, profile: str) -> bool:
+            return False
+
+        def hold(self, profile: str, *, seconds: float) -> None:
+            raise AssertionError("nobody is holding this wheel")
+
         async def perform(self, profile: str, action: str, args: dict[str, Any]) -> dict[str, Any]:
             performed.append((profile, action, args))
             return {"ok": True, "url": args.get("url"), "title": "Fee Schedule"}

@@ -305,7 +305,9 @@ class BrowserGateway:
 
     def __init__(self, root: Path | None = None, *, max_resident: int = MAX_RESIDENT) -> None:
         self.root = root or PROFILE_ROOT
-        self.max_resident = max_resident
+        #: At least one, or ``_evict_if_full`` loops on an empty dict forever
+        #: and ``min()`` raises on the empty sequence.
+        self.max_resident = max(1, max_resident)
         self._profiles: dict[str, _Profile] = {}
         #: Holds by profile, kept outside :attr:`_profiles` so taking the wheel
         #: of a browser that is not open yet still refuses the bot when it
@@ -370,7 +372,13 @@ class BrowserGateway:
             await self._evict_if_full()
             playwright = await self._ensure_playwright()
             directory = self.root / name
-            directory.mkdir(parents=True, exist_ok=True)
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                # Wrapped, because everything above returns a tool result and
+                # an OSError here escaped `perform` entirely — the agent got an
+                # HTTP 500 instead of the clean error the docstring promises.
+                raise BrowserUnavailable(f"could not make room for {name}: {exc}") from exc
             try:
                 context = await playwright.chromium.launch_persistent_context(
                     str(directory),
@@ -441,9 +449,25 @@ class BrowserGateway:
         _logger.info("browser gateway: closed profile %s", name)
 
     async def sweep(self) -> None:
-        """Close profiles nothing has used for a while."""
+        """
+        Close profiles nothing has used for a while.
+
+        Called from :meth:`perform` and :meth:`frame` rather than from a timer:
+        it had no caller at all, which made :data:`IDLE_CLOSE_S` documentation
+        rather than behaviour and left a logged-in browser resident for as long
+        as the server ran. An uncalled reaper reads exactly like a working one.
+
+        Never closes a browser somebody is using, for the same reason eviction
+        does not.
+        """
         cutoff = time.monotonic() - IDLE_CLOSE_S
-        for name in [n for n, p in self._profiles.items() if p.last_used < cutoff]:
+        stale = [
+            name
+            for name, entry in self._profiles.items()
+            if entry.last_used < cutoff and not entry.lock.locked()
+        ]
+        for name in stale:
+            _logger.info("browser gateway: %s idle for %.0fs; closing", name, IDLE_CLOSE_S)
             await self.close(name)
 
     async def shutdown(self) -> None:
@@ -510,6 +534,7 @@ class BrowserGateway:
         :param args: The tool's arguments.
         :returns: The action result.
         """
+        await self.sweep()
         try:
             entry = await self._profile_for(profile)
         except BrowserUnavailable as exc:
@@ -535,10 +560,16 @@ class BrowserGateway:
                     "error": f"{action} did not finish in {ACTION_TIMEOUT_S:.0f}s",
                 }
                 self._record(entry, action, args, result)
+                # Capture on the way out, not only on success. The frame a
+                # person watches went stale exactly when something interesting
+                # was going wrong — a hung click leaves the last *good* picture
+                # on screen, which is the most misleading thing it could show.
+                await self._capture(entry)
                 return result
             except Exception as exc:  # noqa: BLE001 - a page can fail in any way
                 result = {"ok": False, "error": _safe_error(f"{action} failed: {exc}")}
                 self._record(entry, action, args, result)
+                await self._capture(entry)
                 return result
             self._record(entry, action, args, result)
             entry.last_used = time.monotonic()
@@ -678,10 +709,18 @@ class BrowserGateway:
                 "title": await page.title(),
                 "text": result.get("text", ""),
                 "tree": "\n".join(_line(element) for element in elements),
-                # Say so rather than letting a truncated list read as the whole
-                # page: an agent that thinks it has seen every control will
-                # conclude the one it wants does not exist.
+                # What this snapshot could not see, said out loud. An agent
+                # that believes it has seen every control concludes the one it
+                # wants does not exist — and a consent, OAuth or payment form
+                # is *always* in an iframe, which this cannot read at all.
                 "truncated": len(elements) >= MAX_REFS,
+                "hidden_frames": max(0, len(page.frames) - 1),
+                "note": (
+                    "this snapshot covers the main document only; "
+                    f"{len(page.frames) - 1} embedded frame(s) were not read"
+                    if len(page.frames) > 1
+                    else ""
+                ),
             }
         if action in ("click", "type"):
             selector, error = _target(args, entry)
@@ -778,6 +817,10 @@ class BrowserGateway:
             url = _safe_url(entry.page.url)
         except Exception:  # noqa: BLE001
             title, url = "", ""
+        if entry.frame is None:
+            # Open, but nothing has been drawn yet. Reporting ok with a null
+            # image left the panel showing an empty box where a page should be.
+            return {"ok": False, "error": "that browser has not loaded a page yet"}
         return {"ok": True, "dataUrl": entry.frame, "url": url, "title": title}
 
     def resident(self) -> list[str]:

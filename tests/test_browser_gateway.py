@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from omnigent.browser.gateway import (
+    IDLE_CLOSE_S,
     MAX_REFS,
     TRAIL_LENGTH,
     BrowserGateway,
@@ -673,3 +674,106 @@ async def test_the_refusal_is_recorded_so_the_gap_is_explicable(
 
     assert gateway.trail("test")[-1]["ok"] is False
     assert "wheel" in gateway.trail("test")[-1]["error"]
+
+
+# ── the things that were documentation rather than behaviour ─────
+
+
+async def test_an_idle_browser_is_actually_closed(tmp_path: Path) -> None:
+    """`IDLE_CLOSE_S` had no caller, so it described nothing.
+
+    A logged-in browser stayed resident for as long as the server ran. An
+    uncalled reaper reads exactly like a working one to anybody skimming.
+    """
+    gateway = BrowserGateway(root=tmp_path)
+    try:
+        await gateway.perform("test", "navigate", {"url": _url(PAGE)})
+    except Exception:
+        pytest.skip("no browser available")
+    assert "test" in gateway.resident()
+
+    gateway._profiles["test"].last_used -= IDLE_CLOSE_S + 1
+    await gateway.sweep()
+
+    assert gateway.resident() == []
+    await gateway.shutdown()
+
+
+async def test_sweeping_does_not_close_a_browser_in_use(gateway: BrowserGateway) -> None:
+    """Same rule as eviction: idle-looking is not the same as idle."""
+    await gateway.perform("test", "navigate", {"url": _url(PAGE)})
+    entry = gateway._profiles["test"]
+    entry.last_used -= IDLE_CLOSE_S + 1
+
+    async with entry.lock:
+        await gateway.sweep()
+
+    assert "test" in gateway.resident()
+
+
+async def test_a_snapshot_admits_the_frames_it_cannot_read(gateway: BrowserGateway) -> None:
+    """Consent, OAuth and payment forms are always in an iframe.
+
+    The snapshot reads the main document only, and said `truncated: false` —
+    so an agent looking for the sign-in button concluded it did not exist and
+    looped, which is the failure the truncation flag exists to prevent.
+    """
+    page = f'<html><body><h1>Outer</h1><iframe src="{_url(PAGE)}"></iframe></body></html>'
+    await gateway.perform("test", "navigate", {"url": _url(page)})
+
+    snapshot = await gateway.perform("test", "snapshot", {})
+
+    assert snapshot["hidden_frames"] == 1
+    assert "not read" in snapshot["note"]
+
+
+async def test_a_page_with_no_frames_says_nothing_about_them(gateway: BrowserGateway) -> None:
+    """The note must not be noise on the ordinary case."""
+    await gateway.perform("test", "navigate", {"url": _url(PAGE)})
+    snapshot = await gateway.perform("test", "snapshot", {})
+
+    assert snapshot["hidden_frames"] == 0
+    assert snapshot["note"] == ""
+
+
+async def test_a_frame_is_captured_even_when_the_action_failed(
+    gateway: BrowserGateway,
+) -> None:
+    """A hung click left the last *good* picture on screen.
+
+    Which is the most misleading thing the panel could show: the watcher sees a
+    working page at exactly the moment the bot is stuck on a broken one.
+    """
+    await gateway.perform("test", "navigate", {"url": _url(PAGE)})
+    snapshot = await gateway.perform("test", "snapshot", {})
+    before = gateway._profiles["test"].frame
+
+    await gateway._profiles["test"].page.goto(
+        _url("<html><body><h1>a different page entirely</h1></body></html>")
+    )
+    await gateway.perform(
+        "test", "click", {"ref": _ref(snapshot["tree"], "Reject All"), "snapshot_id": "stale"}
+    )
+
+    assert gateway._profiles["test"].frame != before
+
+
+async def test_a_browser_with_nothing_drawn_says_so(tmp_path: Path) -> None:
+    """`ok` with a null image left the panel showing an empty box."""
+    gateway = BrowserGateway(root=tmp_path)
+    try:
+        await gateway._profile_for("blank")
+    except BrowserUnavailable:
+        pytest.skip("no browser available")
+
+    frame = await gateway.frame("blank", fresh=False)
+
+    assert frame["ok"] is False
+    assert "not loaded a page" in frame["error"]
+    await gateway.shutdown()
+
+
+async def test_a_cap_of_zero_does_not_wedge_the_gateway(tmp_path: Path) -> None:
+    """`min()` on an empty sequence, in a while loop that never ends."""
+    gateway = BrowserGateway(root=tmp_path, max_resident=0)
+    assert gateway.max_resident >= 1

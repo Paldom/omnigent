@@ -189,3 +189,30 @@ def test_the_wheel_and_the_gateway_agree_on_what_a_profile_is_called() -> None:
         "x" * 200,
     ):
         assert canonical_profile(name) == _canonical(name), name
+
+
+def test_releasing_records_whose_hold_it_was(site: BotsSite, bots: BotStore) -> None:
+    """Two people watching one bot is a normal Tuesday, so a release ends somebody's turn.
+
+    There is one operator identity here, so this cannot be an authorisation
+    check. It can be a record — which is what makes "the browser stopped being
+    mine halfway through signing in" explicable rather than mysterious.
+    """
+    bot_id = _watcher(bots)
+    messages = MessageStore(bots)
+    site.wheel({"bot": ["watcher"], "action": ["take"], "why": ["signing in"]}, now=NOW)
+    site.wheel({"bot": ["watcher"], "action": ["release"]}, now=NOW + 60)
+
+    handback = next(
+        message for message in messages.channel(bot_id, limit=10) if "handed back" in message.body
+    )
+    assert "s of the hold left" in handback.body
+
+
+def test_releasing_a_wheel_nobody_holds_says_so(site: BotsSite, bots: BotStore) -> None:
+    """Rather than announcing a handback that did not happen."""
+    _watcher(bots)
+    notice, problem = site.wheel({"bot": ["watcher"], "action": ["release"]}, now=NOW)
+
+    assert problem == ""
+    assert "already driving itself" in notice

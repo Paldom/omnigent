@@ -679,9 +679,23 @@ class BotsSite:
             return "", "say take or release"
 
         if action == "release":
+            # Who was holding it, and for how long they still had it. Two
+            # people watching one bot is a normal Tuesday — `take` says so —
+            # so a release is sometimes one person ending another's session
+            # mid sign-in. There is one operator identity here, so this cannot
+            # be an authorisation check; it can be a record, which is what
+            # makes the gap explicable afterwards instead of mysterious.
+            held = self.wheels.held_by(bot.id, now=now)
+            if held is None:
+                return f"{bot.slug} was already driving itself.", ""
             self.wheels.release(bot.id)
             self.messages.post(
-                bot.id, "human:channel", MessageKind.EVENT, "Wheel handed back.", now=now
+                bot.id,
+                "human:channel",
+                MessageKind.EVENT,
+                f"Wheel handed back with {held.held_until - now}s of the hold left.",
+                now=now,
+                payload={"held_by": held.driver, "taken_at": held.taken_at},
             )
             return f"{bot.slug} has its browser back.", ""
 
