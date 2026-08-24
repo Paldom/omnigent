@@ -719,6 +719,44 @@ describe("BotsPage", () => {
     expect(screen.getByRole("button", { name: /uneasy/ })).toHaveAttribute("aria-pressed", "true");
   });
 
+  it("offers no marks on things that merely happened", async () => {
+    // Four controls under "Wheel handed back." is four opinions nobody has,
+    // repeated down the whole channel. A verdict is excluded too: it is
+    // already a decision, and offering to acknowledge one invites exactly the
+    // confusion this feature exists to avoid.
+    getBot.mockResolvedValue(
+      detail({
+        pending: [],
+        channel: [
+          {
+            id: "e".repeat(32),
+            seq: 1,
+            kind: "event",
+            author: "human:channel",
+            body: "Wheel handed back.",
+            at: 0,
+            thread: null,
+            marks: [],
+          },
+          {
+            id: "f".repeat(32),
+            seq: 2,
+            kind: "verdict",
+            author: "human:dpal",
+            body: "Approved: acknowledge",
+            at: 0,
+            thread: null,
+            marks: [],
+          },
+        ],
+      }),
+    );
+    renderPage();
+    await screen.findByText("Wheel handed back.");
+
+    expect(screen.queryByRole("button", { name: /I have read this/ })).not.toBeInTheDocument();
+  });
+
   it("shows a running bot working, with a way into the session", async () => {
     // A channel that only shows finished messages goes silent for the minutes
     // an iteration takes, and silence reads as broken.

@@ -580,6 +580,14 @@ function Composer({
 
 /** One line in the channel. */
 /**
+ * What is worth acknowledging: things the bot said, not things that happened.
+ *
+ * A verdict is excluded too — it is already a decision, and offering to
+ * acknowledge one invites exactly the confusion this feature exists to avoid.
+ */
+const MARKABLE = new Set(["report", "ask", "bot_msg", "bot_to_bot"]);
+
+/**
  * One line of the channel, and the lightest way to answer it.
  *
  * The marks are acknowledgement and carry no authority — which is why none of
@@ -600,6 +608,11 @@ function ChannelLine({
   busy: boolean;
 }) {
   const isAsk = message.kind === "ask";
+  // Only what the bot said. A row of marks under "Wheel handed back." is four
+  // controls for an act nobody has an opinion about, repeated down the whole
+  // channel — and the first thing I marked while testing this was exactly that,
+  // which is how you find out an affordance is in the wrong place.
+  const markable = MARKABLE.has(message.kind);
   return (
     <div className="group border-[var(--border-weak)] border-t py-2.5">
       <p className="m-0 flex items-baseline gap-2 text-muted-foreground text-sm">
@@ -609,33 +622,40 @@ function ChannelLine({
       </p>
       <p className="m-0 mt-0.5 whitespace-pre-wrap">{message.body}</p>
 
-      <div className="mt-1 flex items-center gap-1">
-        {MARKS.map((mark) => {
-          const on = message.marks.includes(mark.value);
-          return (
-            <button
-              key={mark.value}
-              type="button"
-              disabled={busy}
-              onClick={() => onMark(mark.value)}
-              aria-pressed={on}
-              title={`${mark.means} — this is not an approval`}
-              aria-label={`${mark.means}. This is not an approval.`}
-              className={cn(
-                "rounded-otto-button border px-1.5 py-0 text-sm leading-5",
-                on
-                  ? "border-border bg-muted"
-                  : "border-transparent text-muted-foreground opacity-0 group-focus-within:opacity-100 group-hover:opacity-100",
-              )}
-            >
-              {mark.glyph}
-            </button>
-          );
-        })}
-        {message.marks.length > 0 && (
-          <span className="text-muted-foreground text-sm">acknowledged — not an approval</span>
-        )}
-      </div>
+      {markable && (
+        <div className="mt-1 flex items-center gap-1">
+          {MARKS.map((mark) => {
+            const on = message.marks.includes(mark.value);
+            return (
+              <button
+                key={mark.value}
+                type="button"
+                disabled={busy}
+                onClick={() => onMark(mark.value)}
+                aria-pressed={on}
+                title={`${mark.means} — this is not an approval`}
+                aria-label={`${mark.means}. This is not an approval.`}
+                className={cn(
+                  "rounded-otto-button border px-1.5 py-0 text-sm leading-5",
+                  on
+                    ? "border-border bg-muted"
+                    : // Quiet, not hidden. Reveal-on-hover is the chat-app
+                      // convention and it means the control does not exist on a
+                      // touch screen — and this page is meant to be answerable
+                      // from a phone, which is the whole reason the approval
+                      // path works over the tailnet.
+                      "border-transparent text-muted-foreground opacity-40 group-focus-within:opacity-100 group-hover:opacity-100",
+                )}
+              >
+                {mark.glyph}
+              </button>
+            );
+          })}
+          {message.marks.length > 0 && (
+            <span className="text-muted-foreground text-sm">acknowledged — not an approval</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
