@@ -241,6 +241,7 @@ class OmniClient:
         harness: str | None = None,
         workspace: str | None = None,
         host_id: str | None = None,
+        labels: dict[str, str] | None = None,
     ) -> str:
         """
         Start a session and return its id.
@@ -257,9 +258,16 @@ class OmniClient:
         :param host_id: Host to pin the session to. Without one no runner is
             bound, and every message to the session is refused with
             ``runner_unavailable`` — so an unattended loop needs this set.
+        :param labels: Session labels. ``omnigent.browser.profile`` is the one
+            that matters here: its presence is what routes this session's
+            ``browser_*`` actions to the server-owned browser gateway instead
+            of waiting for a desktop renderer that a headless fleet does not
+            have.
         :returns: The new session id.
         """
         body: dict[str, Any] = {"agent_id": agent_id}
+        if labels:
+            body["labels"] = dict(labels)
         if title is not None:
             body["title"] = title
         if harness is not None:

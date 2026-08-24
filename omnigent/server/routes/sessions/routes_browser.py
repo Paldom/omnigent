@@ -1,4 +1,16 @@
-"""Browser action bridge routes."""
+"""Browser action bridge routes.
+
+Two executors behind one tool surface. A person's conversation is served by the
+desktop app's embedded browser, claimed by whichever Electron window wins the
+race. A bot's session is served by the server-owned browser gateway, because a
+background fleet has no subscribed renderer and its actions would otherwise sit
+until they timed out.
+
+Which one runs is decided by a label the bot's control plane sets when it opens
+the session. Nothing here imports that control plane — the label is the whole
+contract, and the wheel is asked over the same loopback boundary the bots proxy
+already uses.
+"""
 
 from __future__ import annotations
 
@@ -48,6 +60,10 @@ from omnigent.server.schemas import (
 from omnigent.stores import ConversationStore
 from omnigent.stores.permission_store import PermissionStore
 
+#: The session label a bot's control plane sets to name its browser profile.
+#: Its presence is what routes an action to the gateway instead of the desktop.
+_BROWSER_PROFILE_LABEL = "omnigent.browser.profile"
+
 
 def register_browser_routes(
     router: APIRouter,
@@ -57,6 +73,46 @@ def register_browser_routes(
     permission_store: PermissionStore | None = None,
 ) -> None:
     """Register the browser routes on router."""
+
+    async def _gateway_profile(store: Any, session_id: str) -> str | None:
+        """
+        The browser profile this session should drive, if it is a bot's.
+
+        Read from the session's labels rather than by asking Bot mode, so the
+        hot path is a store read the route already has rights to and the
+        server keeps importing nothing from ``army``.
+
+        :param store: The conversation store.
+        :param session_id: The session.
+        :returns: The profile name, or ``None`` for an ordinary conversation.
+        """
+        try:
+            conversation = await store.get(session_id)
+        except Exception:
+            return None
+        labels = getattr(conversation, "labels", None) or {}
+        profile = labels.get(_BROWSER_PROFILE_LABEL)
+        return str(profile) if profile else None
+
+    async def _wheel_refusal(session_id: str) -> str:
+        """
+        Whether a person has taken this session's browser, and what to say.
+
+        Asked over the same loopback boundary the bots proxy uses, so this
+        module imports nothing from ``army``. Fails **open**: a control plane
+        that is down or slow must not freeze every bot's browser, and the
+        refusal is a courtesy to the agent rather than the boundary — nothing
+        here is what stops a bot doing something it must not.
+
+        :param session_id: The session about to act.
+        :returns: The refusal text, or ``""`` to proceed.
+        """
+        try:
+            from omnigent.server.routes.bots import wheel_refusal_for_session
+
+            return await wheel_refusal_for_session(session_id)
+        except Exception:
+            return ""
 
     @router.post(
         "/sessions/{session_id}/browser/action_request",
@@ -99,6 +155,25 @@ def register_browser_routes(
             )
         if not isinstance(args, dict):
             args = {}
+
+        # A bot's session names a browser profile in its labels, and that is
+        # the whole routing decision: the desktop relay executes for a person's
+        # conversation, the server-owned gateway executes for a bot's. Same
+        # tool, same arguments, same result shape — a different executor,
+        # because a background fleet has no subscribed renderer and its actions
+        # would otherwise sit until they timed out.
+        profile = await _gateway_profile(conversation_store, session_id)
+        if profile is not None:
+            refusal = await _wheel_refusal(session_id)
+            if refusal:
+                # Refused, not queued. A queued click lands after the person
+                # has navigated away, on a page that is no longer the one it
+                # was reasoned about — including reads, because a snapshot
+                # taken while somebody is typing a password transcribes it.
+                return {"ok": False, "error": refusal}
+            from omnigent.browser import gateway as _browser_gateway
+
+            return await _browser_gateway().perform(profile, action, args)
 
         action_id = f"baction_{secrets.token_hex(16)}"
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()

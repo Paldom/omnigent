@@ -7766,6 +7766,75 @@
         ]
       }
     },
+    "/v1/bots/wheel": {
+      "post": {
+        "description": "Take a bot's browser, or hand it back.\n\nWhile a person holds it the bot's browser actions are refused rather\nthan queued: a queued click lands after the human has navigated away,\non a page that is no longer the one it was reasoned about.",
+        "operationId": "wheel_v1_bots_wheel_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Wheel V1 Bots Wheel Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Wheel",
+        "tags": [
+          "bots"
+        ]
+      }
+    },
+    "/v1/bots/wheel/{session_id}": {
+      "get": {
+        "description": "Whether a browser action for this session must be refused.\n\nAsked by the desktop relay after it wins the claim and before it drives\nthe page. Fails open in every direction \u2014 Bot mode not running, no\nwheel held, unknown session \u2014 because a control-plane hiccup that\nsilently froze every browser is a worse failure than one missed\nrefusal.",
+        "operationId": "wheel_for_session_v1_bots_wheel__session_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Wheel For Session V1 Bots Wheel  Session Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Wheel For Session",
+        "tags": [
+          "bots"
+        ]
+      }
+    },
     "/v1/bots/{slug}": {
       "get": {
         "description": "One bot's definition, ledger, channel and open question.",

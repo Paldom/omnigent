@@ -35,6 +35,7 @@ from army.bots.roster import RosterEntry, roster, summarise
 from army.bots.schedule import first_wake
 from army.bots.spawn import SpawnRefused
 from army.bots.store import BotStore
+from army.bots.wheel import REFUSAL
 from army.bots.workspace import Workspace
 from army.gates import GateRefused, digest
 from army.store import ConcurrentTransition, Store
@@ -172,6 +173,8 @@ class BotsSite:
         property that matters here.
     :param spawns: Proposals from bots, or ``None`` to hide that page.
     :param budgets: The ledger, so the roster can say what is left.
+    :param wheels: Who is driving each bot's browser, or ``None`` to disable
+        control handoff entirely.
     :param workspace: Resolves where a bot's directory is. Needed because
         ``bots.workspace`` is only set when a definition named one — a bot that
         took the default root has the column empty, and reading the column
@@ -188,6 +191,7 @@ class BotsSite:
         spawns: Any = None,
         budgets: Any = None,
         workspace: Workspace | None = None,
+        wheels: Any = None,
     ) -> None:
         self.store = store
         self.bots = bots
@@ -197,6 +201,7 @@ class BotsSite:
         self.spawns = spawns
         self.budgets = budgets
         self.workspace = workspace if workspace is not None else Workspace(bots)
+        self.wheels = wheels
 
     def authorises(self, supplied: str) -> bool:
         """
@@ -608,6 +613,82 @@ class BotsSite:
         )
         return f"Recorded {command.kind.value}; the loop applies it on its next tick.", ""
 
+    def wheel_for_session(self, session_id: str, *, now: int) -> str:
+        """
+        Whether a browser action for this session must be refused, and why.
+
+        Asked by the desktop relay after it wins the claim and before it
+        touches the page. Keyed by session because that is all the relay knows;
+        the wheel is keyed by bot, so this is the join.
+
+        Fails **open** — an unknown session, a missing wheel store, or a bot
+        nobody is driving all answer "go ahead". A control-plane hiccup that
+        silently froze every bot's browser would be a much worse failure than
+        one missed refusal, and the refusal is a courtesy to the agent rather
+        than the boundary: nothing here is what stops a bot doing something it
+        must not.
+
+        :param session_id: The Omnigent conversation the action belongs to.
+        :param now: Epoch seconds.
+        :returns: The refusal to hand back, or ``""`` to proceed.
+        """
+        if self.wheels is None or not session_id:
+            return ""
+        held = self.wheels.all_held(now=now)
+        if not held:
+            return ""
+        for bot_id in held:
+            for run in self.bots.runs_for(bot_id, limit=4):
+                if run.get("session_id") == session_id:
+                    return REFUSAL
+        return ""
+
+    def wheel(self, form: dict[str, list[str]], *, now: int) -> tuple[str, str]:
+        """
+        Take a bot's browser, or hand it back.
+
+        OpenBot's rule, kept verbatim because the alternative is worse: while a
+        person is driving, the bot's browser actions are **refused rather than
+        queued**. A queued click lands after the human has navigated away, on a
+        page that is no longer the one it was reasoned about.
+
+        Both directions are announced in the channel. The bot's own record of
+        why it was interrupted is the thing that makes a refusal readable
+        afterwards rather than a mysterious gap in an iteration.
+
+        :param form: ``bot`` and ``action`` (``take`` or ``release``).
+        :param now: Epoch seconds.
+        :returns: ``(notice, problem)``, one of which is empty.
+        """
+        if self.wheels is None:
+            return "", "this control plane has no browser wheel"
+        bot = self.bots.by_slug(_first(form, "bot"))
+        if bot is None:
+            return "", "no bot by that name"
+        action = _first(form, "action")
+        if action not in ("take", "release"):
+            return "", "say take or release"
+
+        if action == "release":
+            self.wheels.release(bot.id)
+            self.messages.post(
+                bot.id, "human:channel", MessageKind.EVENT, "Wheel handed back.", now=now
+            )
+            return f"{bot.slug} has its browser back.", ""
+
+        held = self.wheels.take(
+            bot.id, "human:channel", now=now, reason=_first(form, "why") or None
+        )
+        self.messages.post(
+            bot.id,
+            "human:channel",
+            MessageKind.EVENT,
+            "A person took the wheel. Browser actions are refused until they hand it back.",
+            now=now,
+            payload={"held_until": held.held_until},
+        )
+        return "You have the wheel. Its browser actions are refused until you release it.", ""
+
     def say(self, form: dict[str, list[str]], *, now: int) -> tuple[str, str]:
         """
         Say something to a bot.
@@ -998,6 +1079,21 @@ class BotsSite:
                 # page must say so rather than offer a button that is certain
                 # to be refused.
                 "can_sign": self.approvals.broker is not None,
+                # Who is driving each browser. The page renders it and the
+                # desktop relay consults it before claiming an action, so one
+                # answer serves the display and the enforcement.
+                "driving": {
+                    self.bots.get(bot_id).slug: {  # type: ignore[union-attr]
+                        "driver": held.driver,
+                        "since": held.taken_at,
+                        "until": held.held_until,
+                        "reason": held.reason,
+                    }
+                    for bot_id, held in (
+                        self.wheels.all_held(now=now) if self.wheels is not None else {}
+                    ).items()
+                    if self.bots.get(bot_id) is not None
+                },
                 "drafts": [self._draft_json(request) for request in self._proposals()],
             },
             indent=2,
@@ -1073,6 +1169,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if route.path == "/api/bots":
             self._send(200, self.site.api(now=now), "application/json")
+        elif route.path.startswith("/api/wheel/"):
+            refusal = self.site.wheel_for_session(route.path.removeprefix("/api/wheel/"), now=now)
+            self._send(200, json.dumps({"refuse": refusal}), "application/json")
         elif route.path.startswith("/api/files/"):
             payload = self.site.files_json(
                 route.path.removeprefix("/api/files/"),
@@ -1149,6 +1248,7 @@ class _Handler(BaseHTTPRequestHandler):
             "/owner/sign": self.site.sign,
             "/spawn/adopt": self.site.adopt,
             "/say": self.site.say,
+            "/wheel": self.site.wheel,
         }
         action = actions.get(route.path)
         if action is None:

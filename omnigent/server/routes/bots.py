@@ -62,6 +62,37 @@ def _token() -> str | None:
     return secret or None
 
 
+async def wheel_refusal_for_session(session_id: str) -> str:
+    """
+    Whether a person has taken the browser of the bot that owns this session.
+
+    Lives here because this module already holds the loopback client and the
+    token, so the browser route can ask without importing ``army`` or learning
+    where the control plane is.
+
+    Fails open on every error, deliberately: a control plane that is down must
+    not freeze every bot's browser, and this refusal is a courtesy to the agent
+    rather than a boundary.
+
+    :param session_id: The Omnigent conversation about to act.
+    :returns: The refusal text, or ``""`` to proceed.
+    """
+    token = _token()
+    if token is None or not session_id:
+        return ""
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(
+                f"{_base_url()}/api/wheel/{session_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        if response.status_code != 200:
+            return ""
+        return str(response.json().get("refuse") or "")
+    except (httpx.HTTPError, ValueError):
+        return ""
+
+
 def create_bots_router(*, auth_provider: AuthProvider | None = None) -> APIRouter:
     """
     Build the router for the Bots section.
@@ -164,6 +195,41 @@ def create_bots_router(*, auth_provider: AuthProvider | None = None) -> APIRoute
                 "approval": str(body.get("approval", "")),
                 "choice": str(body.get("choice", "")),
                 "decision": "approve" if body.get("approved") else "deny",
+            },
+        )
+
+    @router.get("/bots/wheel/{session_id}")
+    async def wheel_for_session(request: Request, session_id: str) -> dict[str, Any]:
+        """
+        Whether a browser action for this session must be refused.
+
+        Asked by the desktop relay after it wins the claim and before it drives
+        the page. Fails open in every direction — Bot mode not running, no
+        wheel held, unknown session — because a control-plane hiccup that
+        silently froze every browser is a worse failure than one missed
+        refusal.
+        """
+        require_user(request, auth_provider)
+        return await _forward("GET", f"/api/wheel/{session_id}")
+
+    @router.post("/bots/wheel")
+    async def wheel(request: Request) -> dict[str, Any]:
+        """
+        Take a bot's browser, or hand it back.
+
+        While a person holds it the bot's browser actions are refused rather
+        than queued: a queued click lands after the human has navigated away,
+        on a page that is no longer the one it was reasoned about.
+        """
+        require_user(request, auth_provider)
+        body = await request.json()
+        return await _forward(
+            "POST",
+            "/wheel",
+            data={
+                "bot": str(body.get("bot", "")),
+                "action": "take" if body.get("take") else "release",
+                "why": str(body.get("why", "")),
             },
         )
 
