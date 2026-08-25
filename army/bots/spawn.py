@@ -1,5 +1,22 @@
 """A bot may define a bot. Only a human may switch one on.
 
+## Not reachable by a bot today, deliberately
+
+``propose`` has no production caller: nothing gives a bot a way to invoke it,
+and the only callers are tests. That is a **feature claim this module does not
+currently deliver**, and it is written here rather than left to be discovered,
+because five other helpers in this codebase read as working features while
+having no callers at all.
+
+It stays unwired on advice rather than by neglect. A definition is data that
+names importable code, and the registry allowlist is the only thing standing
+between "a bot proposed a bot" and a capability escalation wearing a
+scheduler's clothes. The safe shape — a proposal that names an operator-owned
+template and bounded parameters, never a definition body — is a policy review
+nobody has asked to pay for. Until somebody wants bot-proposed bots badly
+enough to fund that, this is a human-only path: an operator writes a
+definition, and ``activate`` enforces the caps below.
+
 That single rule is what makes runaway self-replication *structurally*
 impossible rather than merely discouraged, and it is why this module exists at
 all rather than a `create_bot` tool. A bot writes a definition and asks; the

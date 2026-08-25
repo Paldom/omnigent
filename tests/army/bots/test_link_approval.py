@@ -124,3 +124,37 @@ def test_a_link_goes_through_the_same_path_the_page_uses(site: BotsSite, bots: B
     decided = site.approvals.get(approval_id)
     assert decided.state.name == "APPROVED"
     assert decided.decided_by, "the audit trail records who"
+
+
+def test_the_confirm_page_shows_what_changed(site: BotsSite, bots: BotStore) -> None:
+    """A watcher's whole pitch is "the one fact that matters is *that* it changed".
+
+    Somebody arriving from a chat link was shown the headline and asked to
+    trust it. The before and the after are already in the evidence; putting
+    them next to the question is the diff, and it costs nothing.
+    """
+    global _made
+    _made += 1
+    bot = activate(bots, make_bot(f"watcher{_made}"), now=NOW)
+    run = site.store.create_run(Run.new("w", {}, now=NOW, bot_id=bot.id))
+    run = site.store.transition(run, RunState.DISPATCHING, now=NOW)
+    run = site.store.transition(run, RunState.COLLECTING, now=NOW)
+    run = site.store.transition(run, RunState.EVALUATING, now=NOW)
+    run = site.store.transition(run, RunState.WAITING_HUMAN, now=NOW)
+    request = site.approvals.request(
+        bot_id=bot.id,
+        run_id=run.id,
+        run_version=run.version,
+        verb="iteration_gate",
+        parameters={"iteration": 1},
+        question="the fee schedule changed",
+        options=["acknowledge", "stop"],
+        evidence={"previously": "0.40% / 0.80%", "answer": "0.50% / 0.90%"},
+        thread_id=run.id,
+        now=NOW,
+    )
+
+    _, body, _ = site.confirm(mint(SECRET, request.id, now=NOW), now=NOW)
+
+    assert "0.40% / 0.80%" in body, "the reading it is being compared against"
+    assert "0.50% / 0.90%" in body, "and what it says now"

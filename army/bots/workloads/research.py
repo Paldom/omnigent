@@ -262,8 +262,19 @@ class ResearchWorkload:
         if self.commit:
             evidence["commit"] = self._commit(question) or "nothing to commit"
 
+        # "Continue or stop", not "may I commit". The commit is a receipt: it
+        # lands on the bot's own worktree branch and is never pushed, so a
+        # `stop` ends the *next* iteration rather than undoing this one.
+        # Gating it behind the answer would be worse than it looks — the sha a
+        # person approved would not be the sha that landed, because a commit
+        # rebuilt later is a different object, and the binding that makes an
+        # approval precise would be answering about something else.
+        evidence["already recorded"] = (
+            f"on branch {self._branch()}, not pushed — stopping ends the next "
+            "iteration, it does not undo this one"
+        )
         return (
-            f"Researched: {question}",
+            f"Researched: {question}. Keep going?",
             ["continue", "stop"],
             evidence,
         )
@@ -338,9 +349,18 @@ class ResearchWorkload:
         self._git("add", "-A")
         if not self._changed_paths() and not self._git("diff", "--cached", "--name-only"):
             return None
+        before = self._git("rev-parse", "--short", "HEAD")
         subject = f"research: {question}"[:72]
         self._git("commit", "-m", subject, "--no-verify")
-        return self._git("rev-parse", "--short", "HEAD")
+        after = self._git("rev-parse", "--short", "HEAD")
+        if after is None or after == before:
+            # `rev-parse HEAD` answers whether or not the commit landed, so
+            # returning it blind reported the *previous* sha as this
+            # iteration's work — an approval card naming a commit that does not
+            # contain what it describes. A failed commit is worth saying.
+            _logger.warning("commit did not land in %s; HEAD is still %s", self.repo, before)
+            return None
+        return after
 
     def _close_line(self, run: Run) -> None:
         """Turn the claimed line into a finished one."""

@@ -764,11 +764,25 @@ class BotsSite:
             )
             or '<button class="btn primary" name=choice value="">approve</button>'
         )
+        # What changed, next to the question, at the moment somebody decides.
+        # The whole pitch of a watcher is "the one fact that matters is *that
+        # it changed*" — and a person arriving from a chat link was being shown
+        # the headline and asked to trust it. These two rows are the diff, and
+        # they cost nothing: they are already in the evidence.
+        before = str(request.evidence.get("previously") or "")
+        after = str(request.evidence.get("answer") or "")
+        diff = (
+            f'<table><tr><td class="sm mut">before</td><td class=mono>{_esc(before)}</td></tr>'
+            f'<tr><td class="sm mut">now</td><td class=mono>{_esc(after)}</td></tr></table>'
+            if before and after
+            else ""
+        )
         return (
             200,
             _page(
                 "Waiting on you",
                 f"<h1>{_esc(request.question)}</h1>"
+                f"{diff}"
                 f'<form method=post action="/approve">'
                 f'<input type=hidden name=t value="{_esc(token)}">'
                 f"<div class=acts>{buttons}"
