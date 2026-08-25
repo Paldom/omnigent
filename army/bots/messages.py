@@ -405,6 +405,37 @@ class MessageStore:
             ).fetchall()
         return [_row_to_message(row) for row in rows]
 
+    def latest(
+        self, bot_id: str, *, kinds: tuple[MessageKind, ...] | None = None, limit: int = 20
+    ) -> list[Message]:
+        """
+        The most recent messages in a bot's channel, newest first.
+
+        :meth:`channel` is ``ORDER BY seq LIMIT n`` — the *oldest* n after a
+        cursor, which is right for paging a conversation forward and wrong for
+        "what happened lately". Two callers wanted the latter and used the
+        former: the briefing's notes and its verdicts both read a bot's
+        earliest two hundred messages, so a bot that had said much of anything
+        was briefed on its first decisions forever and never its last ones. A
+        channel fills with wheel and schedule events, so two hundred is a
+        fortnight, not a lifetime.
+
+        :param bot_id: Whose channel.
+        :param kinds: Only these kinds, or ``None`` for all.
+        :param limit: Most to return.
+        :returns: Messages, newest first.
+        """
+        query = "SELECT * FROM messages WHERE bot_id = ?"
+        params: list[Any] = [bot_id]
+        if kinds:
+            query += f" AND kind IN ({','.join('?' * len(kinds))})"
+            params += [kind.value for kind in kinds]
+        query += " ORDER BY seq DESC LIMIT ?"
+        params.append(limit)
+        with self.store.atomic() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [_row_to_message(row) for row in rows]
+
     def thread(self, bot_id: str, thread_id: str, *, limit: int = 100) -> list[Message]:
         """
         Read one thread — an iteration, or an approval and its answer.

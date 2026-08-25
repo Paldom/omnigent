@@ -44,6 +44,23 @@ _logger = logging.getLogger(__name__)
 _REPLY_CHARS = 3_000
 
 
+#: The line the agent must put its reading on. A verdict word is an opinion;
+#: this is the evidence, and it is what makes "unchanged" checkable by
+#: something that cannot read.
+_ANSWER = re.compile(r"^[^A-Za-z]*ANSWER\s*:\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE)
+
+
+def _answer_in(reply: str) -> str:
+    """
+    The value the agent says it read, or ``""``.
+
+    :param reply: What the agent wrote.
+    :returns: The answer, trimmed.
+    """
+    found = _ANSWER.search(reply or "")
+    return found.group(1).strip() if found else ""
+
+
 class WatchWorkload:
     """Watch one page and report only when the answer changes.
 
@@ -55,6 +72,9 @@ class WatchWorkload:
     :param host: The Omnigent host the body runs on.
     :param workspace: The bot's directory; reports land in ``reports/``.
     :param charter: Prepended to the brief, absolute or workspace-relative.
+    :param expect: A regex the agent's quoted answer must match. When it stops
+        matching, the watcher reports that it has gone blind instead of
+        reporting that nothing changed — which is the same silence.
 
     Names no browser. A bot has exactly one, ``bot.browser_profile``, and the
     supervisor labels every session with it — its own, never shared, because
@@ -74,6 +94,7 @@ class WatchWorkload:
         host: str | None = None,
         workspace: str = ".",
         charter: str | None = None,
+        expect: str | None = None,
     ) -> None:
         self.url = url
         self.question = question
@@ -82,6 +103,10 @@ class WatchWorkload:
         self.agent = agent
         self.host = host
         self.charter = self._resolve(charter) if charter else None
+        #: A regex the quoted answer must still match. Optional, and the single
+        #: most valuable line in a watcher's definition: without it "unchanged"
+        #: and "I cannot see it" are the same silence.
+        self.expect = expect
 
     def _resolve(self, path: str) -> Path:
         candidate = Path(path).expanduser()
@@ -178,6 +203,7 @@ class WatchWorkload:
         # against it, reported UNCHANGED, and the watcher went quietly blind.
         found = re.match(r"[^A-Za-z]*([A-Za-z]+)", headline)
         verdict = found.group(1).upper() if found else ""
+        answer = _answer_in(reply)
 
         evidence = {
             "url": self.url,
@@ -200,13 +226,48 @@ class WatchWorkload:
             )
 
         if verdict == "CHANGED":
-            self._remember(reply)
+            blind = self._blind_reason(answer)
+            if blind:
+                # A "changed" it cannot substantiate is not a reading, and
+                # writing it in as the baseline is how one bad look becomes
+                # every later look agreeing with it.
+                evidence["answer"] = answer or "(the agent quoted nothing)"
+                evidence["blind"] = blind
+                return (
+                    f"says {self.url} changed but cannot show what it read",
+                    ["look again", "stop"],
+                    evidence,
+                )
+            evidence["answer"] = answer
+            self._remember(reply, answer=answer)
             report = self._write_report(run, reply)
             if report:
                 evidence["report"] = report.name
             return (f"{self.url} changed", ["acknowledge", "stop"], evidence)
 
         if verdict == "UNCHANGED":
+            # "The same" and "I could not see it" produce identical silence,
+            # and only one of them is monitoring. A watcher whose page has been
+            # restructured reports nothing forever and looks exactly like one
+            # watching a stable page — the defining failure of the job, and the
+            # one nobody notices, because the evidence of it is an absence.
+            #
+            # So the claim has to be checkable by something dumber than the
+            # thing making it: an agent reading a garbage page will state
+            # "nothing has changed" with total confidence. `expect` is a plain
+            # regex over the answer the agent quoted. If the field it is
+            # watching stops being there, the answer stops matching, and the
+            # bot is blind rather than calm.
+            blind = self._blind_reason(answer)
+            if blind:
+                evidence["answer"] = answer or "(the agent quoted nothing)"
+                evidence["blind"] = blind
+                return (
+                    f"cannot see what it watches on {self.url}",
+                    ["look again", "stop"],
+                    evidence,
+                )
+            evidence["answer"] = answer
             # Nothing new. Asking a person to confirm that is how a watcher
             # trains them to ignore it.
             return ("", [], evidence)
@@ -220,6 +281,27 @@ class WatchWorkload:
             ["look again", "stop"],
             {**evidence, "unparsed": headline or "(the agent said nothing)"},
         )
+
+    def _blind_reason(self, answer: str) -> str:
+        """
+        Why this reading cannot be trusted, or ``""``.
+
+        Deliberately not a model call. The failure being caught is an agent
+        confidently reporting "nothing has changed" about a page whose field it
+        can no longer find — so the check has to be something that cannot be
+        talked into agreeing. A regex is exactly dumb enough.
+
+        :param answer: What the agent quoted on its ``ANSWER:`` line.
+        :returns: A refusal, or ``""``.
+        """
+        if not answer:
+            return "the reply carried no ANSWER: line, so there is nothing to check"
+        if self.expect and not re.search(self.expect, answer):
+            return (
+                f"the answer {answer[:60]!r} no longer looks like what this watches "
+                f"(expected /{self.expect}/) — the page may have been restructured"
+            )
+        return ""
 
     def apply(
         self,
@@ -254,7 +336,7 @@ class WatchWorkload:
         except (OSError, ValueError, AttributeError):
             return None
 
-    def _remember(self, reply: str) -> None:
+    def _remember(self, reply: str, *, answer: str = "") -> None:
         """
         Write the new baseline, keeping the one it replaces.
 
@@ -274,6 +356,10 @@ class WatchWorkload:
                     "url": self.url,
                     "seen_at": datetime.now(UTC).isoformat(timespec="seconds"),
                     "summary": reply[:1_000],
+                    # The value on its own, next to the prose. Prose is what a
+                    # person reads; this is what the next iteration can compare
+                    # without asking a model what it thinks it said.
+                    "answer": answer,
                     "previously": self._last(),
                 },
                 indent=2,
@@ -312,7 +398,15 @@ class WatchWorkload:
             f"{browsing_rules(verdict_word='LOGIN')}\n\n"
             "## Your reply\n\n"
             "Open with **CHANGED**, **UNCHANGED** or **LOGIN** on a line of "
-            "its own. Then the number or fact you were asked for, then how you "
-            "know — the URL and what the page actually said. Keep it short.\n\n"
+            "its own. On the next line put `ANSWER:` and the value you were "
+            "asked for, by itself — the number, the status, the date. Then how "
+            "you know: the URL and what the page actually said. Keep it "
+            "short.\n\n"
+            "The `ANSWER:` line is not decoration. It is the only part of your "
+            "reply that can be checked without reading it, and a watcher that "
+            "cannot show what it read is indistinguishable from one watching a "
+            "page that never changes. If you cannot find the thing you were "
+            "asked for, say so plainly and do not invent a value — being "
+            "unable to see it is a result, and a useful one.\n\n"
             f"Run id `{run.id[:12]}`.\n"
         )

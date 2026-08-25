@@ -210,3 +210,43 @@ def test_a_fleet_without_reactions_still_runs(store: Store, bots: BotStore) -> N
     activate(bots, make_bot("scout", workload=HEARTBEAT, wake=_continuous()), now=NOW)
 
     assert fleet.fleet_tick(now=NOW + 1).started == 1
+
+
+def test_a_mark_the_bot_already_saw_is_taken_back_out_loud(
+    bots: BotStore, messages: MessageStore, reactions: ReactionStore
+) -> None:
+    """Deleting it would leave the bot believing something nobody can see.
+
+    A mark briefed into an iteration is already shaping what the bot does next.
+    Removing the row makes the UI honest and the bot wrong — the worst split
+    available, because nothing on screen explains the behaviour.
+    """
+    bot_id, message_id = _report(bots, messages)
+    reactions.toggle(message_id, "human:channel", "concern", now=NOW)
+    reactions.take_unseen(bot_id, now=NOW + 1)
+
+    assert reactions.toggle(message_id, "human:channel", "concern", now=NOW + 2) is False
+    assert reactions.for_bot(bot_id) == {}, "the UI shows it gone"
+
+    withdrawn = reactions.take_unseen(bot_id, now=NOW + 3)
+    assert len(withdrawn) == 1, "the bot is told it was taken back"
+    text = briefing(withdrawn, {message_id: "a claim"})
+    assert "withdrawn" in text
+    assert "taken this back" in text
+
+
+def test_marking_again_after_a_retraction_is_briefed_again(
+    bots: BotStore, messages: MessageStore, reactions: ReactionStore
+) -> None:
+    """People change their minds twice as often as once."""
+    bot_id, message_id = _report(bots, messages)
+    reactions.toggle(message_id, "human:channel", "useful", now=NOW)
+    reactions.take_unseen(bot_id, now=NOW + 1)
+    reactions.toggle(message_id, "human:channel", "useful", now=NOW + 2)
+    reactions.take_unseen(bot_id, now=NOW + 3)
+
+    assert reactions.toggle(message_id, "human:channel", "useful", now=NOW + 4) is True
+    again = reactions.take_unseen(bot_id, now=NOW + 5)
+    assert len(again) == 1
+    assert again[0].retracted_at is None
+    assert reactions.for_bot(bot_id)[message_id][0].mark == "useful"

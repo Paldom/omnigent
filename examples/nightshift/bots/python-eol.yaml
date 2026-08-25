@@ -29,6 +29,11 @@ workload_config:
     For Python 3.11, 3.12 and 3.13: which are in active support, which are
     security-only, and what is each one's end-of-life date? Quote the row you
     read each date from.
+  # What a real reading looks like. When the support table is restructured and
+  # the agent can no longer find a date, the answer stops matching and the bot
+  # reports that it has gone blind — instead of reporting, forever, that
+  # nothing has changed.
+  expect: '\d{4}-\d{2}-\d{2}|\d{4}'
   workspace: ~/bots/python-eol
   agent: claude-native-ui
 

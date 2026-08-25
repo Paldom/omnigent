@@ -25,6 +25,10 @@ workload_config:
     Is every component operational right now? If not, name each component that
     is not, its stated status, and the title of the open incident. Quote the
     line you read it from.
+  # Every status page in the world says one of these words. If the answer
+  # stops containing one, the page has moved and the watcher says so rather
+  # than going quiet.
+  expect: '(?i)operational|degraded|outage|incident|maintenance'
   workspace: ~/bots/status-watch
   agent: claude-native-ui
 

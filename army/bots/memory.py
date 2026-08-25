@@ -39,6 +39,16 @@ HISTORY_DEPTH = 5
 #: they get more room than ordinary chatter.
 VERDICT_DEPTH = 5
 
+#: How many self-written notes reach a body, newest first.
+#:
+#: Unbounded, this is the one input a bot both writes and reads — so a single
+#: wrong note ("the status page moved to X") is inherited by every future body,
+#: and is *also* the reason that bot stops re-checking. Nothing else in the
+#: briefing has that property: history and verdicts come from rows the bot
+#: cannot author. A cap and a clock are what stop a bot's own mistake becoming
+#: permanent.
+NOTE_DEPTH = 10
+
 #: Unread messages included inline. Beyond this the briefing says how many are
 #: waiting and lets the bot read them itself, rather than pasting a backlog
 #: into every prompt.
@@ -149,7 +159,7 @@ def assemble(
 
     if messages is not None:
         briefing.verdicts = _recent_verdicts(bot, messages)
-        briefing.notes = _notes(bot, messages)
+        briefing.notes = _notes(bot, messages, now=now)
         pending = messages.lease(bot.address, now=now, limit=INBOX_PREVIEW)
         briefing.inbox = [delivery.message for delivery in pending]
         briefing.inbox_waiting = len(pending) + messages.pending_for(bot.address, now=now)
@@ -196,15 +206,33 @@ def _recent_verdicts(bot: Bot, messages: MessageStore) -> list[str]:
     :param messages: Its channel.
     :returns: One line per decision.
     """
-    recent = [
-        message
-        for message in messages.channel(bot.id, after_seq=0, limit=200)
-        if message.kind is MessageKind.VERDICT
-    ]
-    return [_clip(message.body) for message in reversed(recent[-VERDICT_DEPTH:])]
+    # Newest first, and enough of the tail to pair a verdict with its question.
+    channel = list(reversed(messages.latest(bot.id, limit=VERDICT_DEPTH * 40)))
+    # What each verdict was *about*. A decision reaches the next body as prose
+    # — "Denied" — and a bot that cannot see which question that answered will
+    # read it as covering today's, or as covering nothing. Either way the
+    # action-hash binding that made the approval precise is thrown away one
+    # layer later. The question lives in the same thread; this puts it back.
+    asked = {
+        message.thread_id: message.body
+        for message in channel
+        if message.kind is MessageKind.ASK and message.thread_id
+    }
+    recent = [message for message in channel if message.kind is MessageKind.VERDICT]
+
+    lines = []
+    for message in reversed(recent[-VERDICT_DEPTH:]):
+        question = asked.get(message.thread_id or "")
+        decision = _clip(message.body)
+        lines.append(
+            f"{decision} — on: “{_clip(question)}”"
+            if question
+            else f"{decision} — (the question it answered is no longer in the channel)"
+        )
+    return lines
 
 
-def _notes(bot: Bot, messages: MessageStore) -> list[str]:
+def _notes(bot: Bot, messages: MessageStore, *, now: int) -> list[str]:
     """
     Durable notes the bot has written for itself.
 
@@ -214,13 +242,31 @@ def _notes(bot: Bot, messages: MessageStore) -> list[str]:
 
     :param bot: The bot.
     :param messages: Its channel.
-    :returns: The notes, oldest first.
+    :param now: Epoch seconds, for ageing.
+    :returns: The freshest notes, newest first, each dated.
     """
-    return [
-        _clip(message.body)
-        for message in messages.channel(bot.id, after_seq=0, limit=200)
-        if message.kind is MessageKind.REPORT and message.payload.get("kind") == "lesson"
+    # Capped in the *briefing*, not deleted from the channel. A time-to-live on
+    # the table evicts a load-bearing note ("use SSO, not the password form")
+    # exactly as readily as a poisonous one, and the bot has no way to tell
+    # which it lost. Newest first, so a correction outranks the thing it
+    # corrects; dated, because the bot has no other way to doubt itself.
+    lessons = [
+        message
+        for message in messages.latest(bot.id, kinds=(MessageKind.REPORT,), limit=NOTE_DEPTH * 10)
+        if message.payload.get("kind") == "lesson"
     ]
+    return [
+        f"{_age(now - note.created_at)} ago: {_clip(note.body)}" for note in lessons[:NOTE_DEPTH]
+    ]
+
+
+def _age(seconds: int) -> str:
+    """A rough age, in the largest unit that is still honest."""
+    if seconds < 3_600:
+        return f"{max(1, seconds // 60)}m"
+    if seconds < 86_400:
+        return f"{seconds // 3_600}h"
+    return f"{seconds // 86_400}d"
 
 
 def remember(

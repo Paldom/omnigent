@@ -38,6 +38,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from army.bots.store import BotStore
+from army.store import add_missing_columns
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS message_reactions (
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS message_reactions (
     mark       TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     seen_at    INTEGER,
+    retracted_at INTEGER,
     PRIMARY KEY (message_id, actor, mark)
 );
 -- The channel read wants every reaction for one bot in one query, not one
@@ -90,6 +92,9 @@ class Reaction:
     mark: str
     created_at: int
     seen_at: int | None
+    #: When the person took this mark back, or ``None``. A retraction the bot
+    #: was never told about is a deleted row; this is the other case.
+    retracted_at: int | None = None
 
 
 class ReactionStore:
@@ -107,6 +112,7 @@ class ReactionStore:
             # the caller committing nothing.
             for statement in filter(None, (part.strip() for part in _SCHEMA.split(";"))):
                 conn.execute(statement)
+            add_missing_columns(conn, "message_reactions", (("retracted_at", "INTEGER"),))
 
     def toggle(self, message_id: str, actor: str, mark: str, *, now: int) -> bool:
         """
@@ -135,15 +141,37 @@ class ReactionStore:
             if row is None:
                 raise ReactionRefused("no such message")
             existing = conn.execute(
-                "SELECT 1 FROM message_reactions WHERE message_id = ? AND actor = ? AND mark = ?",
+                "SELECT seen_at, retracted_at FROM message_reactions"
+                " WHERE message_id = ? AND actor = ? AND mark = ?",
                 (message_id, actor, mark),
             ).fetchone()
-            if existing is not None:
+            if existing is not None and existing["retracted_at"] is not None:
+                # Marked again after a retraction. Live once more, and unseen,
+                # so the bot is told about this too.
                 conn.execute(
-                    "DELETE FROM message_reactions"
-                    " WHERE message_id = ? AND actor = ? AND mark = ?",
-                    (message_id, actor, mark),
+                    "UPDATE message_reactions SET retracted_at = NULL, seen_at = NULL,"
+                    " created_at = ? WHERE message_id = ? AND actor = ? AND mark = ?",
+                    (now, message_id, actor, mark),
                 )
+                return True
+            if existing is not None:
+                if existing["seen_at"] is None:
+                    # Nobody was told, so there is nothing to take back.
+                    conn.execute(
+                        "DELETE FROM message_reactions"
+                        " WHERE message_id = ? AND actor = ? AND mark = ?",
+                        (message_id, actor, mark),
+                    )
+                else:
+                    # The bot has already been briefed on this. Deleting the row
+                    # would leave it believing something the UI no longer shows —
+                    # a mark you cannot see and cannot argue with. Tombstoned
+                    # instead, and the retraction is briefed like the mark was.
+                    conn.execute(
+                        "UPDATE message_reactions SET retracted_at = ?, seen_at = NULL"
+                        " WHERE message_id = ? AND actor = ? AND mark = ?",
+                        (now, message_id, actor, mark),
+                    )
                 return False
             conn.execute(
                 "INSERT INTO message_reactions"
@@ -165,7 +193,8 @@ class ReactionStore:
         """
         with self.store.atomic() as conn:
             rows = conn.execute(
-                "SELECT * FROM message_reactions WHERE bot_id = ? ORDER BY created_at",
+                "SELECT * FROM message_reactions WHERE bot_id = ?"
+                " AND retracted_at IS NULL ORDER BY created_at",
                 (bot_id,),
             ).fetchall()
         found: dict[str, list[Reaction]] = {}
@@ -217,7 +246,14 @@ def briefing(reactions: list[Reaction], bodies: dict[str, str]) -> str:
     lines = []
     for reaction in reactions:
         quoted = " ".join(bodies.get(reaction.message_id, "").split())[:70]
-        lines.append(f"- **{reaction.mark}** — {MARKS[reaction.mark]}: “{quoted}”")
+        if reaction.retracted_at is not None:
+            # Told once, taken back. Silence would leave the bot acting on a
+            # mark the person has withdrawn and the UI no longer shows.
+            lines.append(
+                f"- **{reaction.mark} — withdrawn.** They have taken this back: “{quoted}”"
+            )
+        else:
+            lines.append(f"- **{reaction.mark}** — {MARKS[reaction.mark]}: “{quoted}”")
     return (
         "## Somebody read your work\n\n"
         + "\n".join(lines)
@@ -238,4 +274,5 @@ def _row(row: sqlite3.Row) -> Reaction:
         mark=row["mark"],
         created_at=int(row["created_at"]),
         seen_at=None if row["seen_at"] is None else int(row["seen_at"]),
+        retracted_at=None if row["retracted_at"] is None else int(row["retracted_at"]),
     )

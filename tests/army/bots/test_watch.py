@@ -19,7 +19,8 @@ NOW = 1_700_000_000
 
 #: What the agent actually wrote on that run, verbatim in shape.
 REAL_REPLY = (
-    "**CHANGED** (first look — baseline recorded)\n\n"
+    "**CHANGED** (first look — baseline recorded)\n"
+    "ANSWER: maker 0.40% / taker 0.80%\n\n"
     "**Spot Tier 1 (lowest volume): maker 0.40% / taker 0.80% per side.**"
 )
 
@@ -110,7 +111,11 @@ def test_unchanged_is_not_mistaken_for_changed(tmp_path: Any) -> None:
     Stripping punctuation to be lenient is exactly how a watcher starts paging
     somebody every morning about a page that never moves.
     """
-    for reply in ("UNCHANGED", "**UNCHANGED**", "### Unchanged — same as yesterday"):
+    for reply in (
+        "UNCHANGED\nANSWER: 0.40 / 0.80",
+        "**UNCHANGED**\nANSWER: 0.40 / 0.80",
+        "### Unchanged — same as yesterday\nANSWER: 0.40 / 0.80",
+    ):
         question, options, _ = _workload(tmp_path).evaluate(_run(reply=reply))
         assert question == "", f"{reply!r} must not raise a question"
         assert options == []
@@ -227,8 +232,10 @@ def test_a_replaced_baseline_is_still_readable(tmp_path: Any) -> None:
     answerable rather than a mystery.
     """
     workload = _workload(tmp_path)
-    workload.evaluate(_run(reply="CHANGED\n\nTier 1: 0.40% / 0.80%"))
-    workload.evaluate(_run(reply="CHANGED — the page now shows a login wall"))
+    workload.evaluate(_run(reply="CHANGED\nANSWER: 0.40% / 0.80%\n\nTier 1"))
+    workload.evaluate(
+        _run(reply="CHANGED — the page now shows a login wall\nANSWER: a login wall")
+    )
 
     kept = json.loads((tmp_path / "last-seen.json").read_text())
     assert "login wall" in kept["summary"]
@@ -252,10 +259,10 @@ def test_an_unparseable_verdict_asks_rather_than_going_quiet(tmp_path: Any) -> N
 def test_the_ordinary_verdicts_still_work(tmp_path: Any) -> None:
     """The parser got stricter; it must not have got narrower."""
     for reply, expect_question in (
-        ("CHANGED\n\n0.40%", True),
-        ("**CHANGED**\n\n0.40%", True),
-        ("### Unchanged — same as yesterday", False),
-        ("UNCHANGED", False),
+        ("CHANGED\nANSWER: 0.40%\n\n0.40%", True),
+        ("**CHANGED**\nANSWER: 0.40%\n\n0.40%", True),
+        ("### Unchanged — same as yesterday\nANSWER: 0.40%", False),
+        ("UNCHANGED\nANSWER: 0.40%", False),
         ("LOGIN\n\nwants a password", True),
     ):
         question, _, _ = _workload(tmp_path).evaluate(_run(reply=reply))
@@ -326,3 +333,64 @@ def test_two_different_runs_get_two_sessions(tmp_path: Any) -> None:
     )
 
     assert monday != tuesday
+
+
+def test_a_watcher_that_cannot_see_says_so_instead_of_saying_nothing(tmp_path: Any) -> None:
+    """ "The same" and "I could not see it" are the same silence, and must not be.
+
+    This is the defining failure of the job: a page is restructured, the agent
+    reports nothing changed with total confidence, and a broken watcher becomes
+    indistinguishable from one watching a stable page — forever, because the
+    evidence of the failure is an absence.
+    """
+    question, options, evidence = _workload(tmp_path).evaluate(
+        _run(reply="UNCHANGED\n\nI could not find a fee table on the page.")
+    )
+
+    assert "cannot see" in question
+    assert options == ["look again", "stop"]
+    assert "no ANSWER" in evidence["blind"]
+
+
+def test_the_sight_check_is_dumber_than_the_watcher(tmp_path: Any) -> None:
+    """An agent reading a garbage page will confidently report nothing changed.
+
+    So the thing checking it cannot be another judgement call. `expect` is a
+    plain regex over the value the agent quoted: when the field stops being
+    there, the answer stops matching, whatever the agent believes about it.
+    """
+    workload = _workload(tmp_path, expect=r"\d+[.,]\d+\s*%")
+
+    good, _, _ = workload.evaluate(_run(reply="UNCHANGED\nANSWER: maker 0.40% / taker 0.80%"))
+    blind, _, evidence = workload.evaluate(
+        _run(reply="UNCHANGED\nANSWER: Fees vary by tier — see the table")
+    )
+
+    assert good == "", "a matching answer is a real UNCHANGED"
+    assert "cannot see" in blind
+    assert "restructured" in evidence["blind"]
+
+
+def test_a_blind_reading_never_becomes_the_baseline(tmp_path: Any) -> None:
+    """One bad look would otherwise become every later look agreeing with it."""
+    workload = _workload(tmp_path, expect=r"\d")
+    workload.evaluate(_run(reply="CHANGED\nANSWER: the page is being maintained"))
+
+    assert not (tmp_path / "last-seen.json").exists()
+
+
+def test_the_baseline_keeps_the_value_next_to_the_prose(tmp_path: Any) -> None:
+    """Prose is what a person reads; the value is what the next run can check."""
+    workload = _workload(tmp_path)
+    workload.evaluate(_run(reply="CHANGED\nANSWER: 0.40% / 0.80%\n\nquoted from the table"))
+
+    kept = json.loads((tmp_path / "last-seen.json").read_text())
+    assert kept["answer"] == "0.40% / 0.80%"
+
+
+def test_the_brief_says_why_the_answer_line_matters(tmp_path: Any) -> None:
+    """A field an agent thinks is decoration is a field it will drop."""
+    brief = _workload(tmp_path)._brief(_run())
+
+    assert "ANSWER:" in brief
+    assert "do not invent a value" in brief

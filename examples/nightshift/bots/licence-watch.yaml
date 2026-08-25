@@ -26,6 +26,8 @@ workload_config:
     What licence is this page publishing, which version of it, and does the
     page state which product versions it applies from? Quote the heading and
     any version or date line you rely on.
+  # A licence page that no longer names a licence is a page that has moved.
+  expect: '(?i)licen[sc]e|SSPL|AGPL|Apache|MIT|BSD'
   workspace: ~/bots/licence-watch
   agent: claude-native-ui
 
