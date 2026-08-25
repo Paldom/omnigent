@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": {
+    "playwright-stealth": {
+      "source": "Paldom/playwright-stealth",
+      "sourceType": "github",
+      "skillPath": "skills/playwright-stealth/SKILL.md",
+      "computedHash": "699cf1a14e7f8b84484f050aaf3e91fe707c90482d67aa327679cee7ec2df7f0"
+    },
+    "playwright-stealth-identity": {
+      "source": "Paldom/playwright-stealth",
+      "sourceType": "github",
+      "skillPath": "skills/playwright-stealth-identity/SKILL.md",
+      "computedHash": "1e358f93307596716f2132b7d9e6f1d8bdf7ebe3ba0a2cdc8de2546798261977"
+    },
+    "playwright-stealth-job": {
+      "source": "Paldom/playwright-stealth",
+      "sourceType": "github",
+      "skillPath": "skills/playwright-stealth-job/SKILL.md",
+      "computedHash": "ae77b218849b6570a4ae596f6e254f604f7e113d4d23a587bc0d8186c19eecea"
+    },
+    "playwright-stealth-setup": {
+      "source": "Paldom/playwright-stealth",
+      "sourceType": "github",
+      "skillPath": "skills/playwright-stealth-setup/SKILL.md",
+      "computedHash": "c4f88290817d1a992f76b96264221329e32c8ee311f6a9e4accacc074e72fd95"
+    }
+  }
+}

@@ -790,3 +790,68 @@ async def test_a_cap_of_zero_does_not_wedge_the_gateway(tmp_path: Path) -> None:
     """`min()` on an empty sequence, in a while loop that never ends."""
     gateway = BrowserGateway(root=tmp_path, max_resident=0)
     assert gateway.max_resident >= 1
+
+
+# ── a bot on a provisioned stealth identity ──────────────────────
+
+
+def _gateway_module():
+    """The module, not the ``gateway()`` function the package re-exports.
+
+    ``omnigent.browser.gateway`` as a dotted string resolves to the factory
+    function, so patching through it silently patches the wrong object.
+    """
+    import sys
+
+    return sys.modules["omnigent.browser.gateway"]
+
+
+async def test_a_profile_with_no_identity_uses_plain_chromium(
+    gateway: BrowserGateway, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stealth is opt-in by *existence*, so the default path must stay default."""
+    monkeypatch.setattr(_gateway_module(), "STEALTH_ROOT", tmp_path / "none")
+    await gateway.perform("test", "navigate", {"url": _url(PAGE)})
+
+    assert gateway._profiles["test"].stealth is False
+
+
+async def test_an_identity_is_found_by_the_bot_s_own_profile_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No flag in a bot definition to forget to set, and none to abuse.
+
+    Provisioning an identity is an operator act — a bot inherits whatever was
+    provisioned under its own canonical name, and a definition cannot ask for
+    one it was not given.
+    """
+    from omnigent.browser.gateway import _stealth_identity
+
+    monkeypatch.setattr(_gateway_module(), "STEALTH_ROOT", tmp_path)
+    (tmp_path / "bot-alice").mkdir()
+    (tmp_path / "bot-alice" / "profile.toml").write_text("[identity]\nseed = 1\n")
+    (tmp_path / "bot-bob").mkdir()  # provisioned directory, no profile yet
+
+    assert _stealth_identity("bot-alice") is not None
+    assert _stealth_identity("bot-bob") is None, "a directory alone is not an identity"
+    assert _stealth_identity("bot-carol") is None
+
+
+async def test_an_identity_with_no_seed_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a pinned seed the binary rolls a new device every launch.
+
+    For a bot whose whole point is *having* a session, a browser that
+    re-verifies as a stranger every run is worse than no stealth at all — so
+    this fails loudly rather than launching something that looks like it works.
+    """
+    monkeypatch.setattr(_gateway_module(), "STEALTH_ROOT", tmp_path)
+    (tmp_path / "bot-seedless").mkdir()
+    (tmp_path / "bot-seedless" / "profile.toml").write_text("[identity]\nseed = 0\n")
+
+    gateway = BrowserGateway(root=tmp_path / "profiles")
+    result = await gateway.perform("bot-seedless", "navigate", {"url": _url(PAGE)})
+
+    assert result["ok"] is False
+    assert "no fingerprint seed" in result["error"]

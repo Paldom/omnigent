@@ -42,6 +42,7 @@ import asyncio
 import base64
 import ipaddress
 import logging
+import os
 import re
 import secrets
 import socket
@@ -57,6 +58,18 @@ _logger = logging.getLogger(__name__)
 #: profile's cookies are its own — sharing one across bots means one bot's
 #: compromise is every bot's session, and an audit trail that cannot attribute.
 PROFILE_ROOT = Path.home() / ".omnigent" / "browser-profiles"
+
+#: Where provisioned CloakBrowser identities live. A bot whose canonical
+#: profile name matches a directory here drives that stealth session instead of
+#: a plain Chromium — same Playwright API, a device pinned by seed, and a
+#: ``user-data`` directory that keeps a real signed-in session between runs.
+#:
+#: Opt-in by existence. Nothing in a bot definition can ask for one: an
+#: identity is provisioned by an operator running the stealth skill, and a bot
+#: gets whatever was provisioned under its own name.
+STEALTH_ROOT = Path(
+    os.environ.get("OMNIGENT_STEALTH_ROOT") or (Path.cwd() / ".stealth")
+).expanduser()
 
 #: Chromium instances resident at once. Small, because a browser each for ten
 #: bots is three gigabytes of mostly idle memory — but deliberately *above* the
@@ -290,6 +303,11 @@ class _Profile:
     #: Serialises actions on this page. Two clicks interleaved on one page is
     #: a class of bug nobody can reproduce.
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: Whether this is a CloakBrowser stealth session rather than plain
+    #: Chromium. Recorded because it changes what the frame means: a stealth
+    #: profile carries a real signed-in identity, so the person watching may be
+    #: looking at their own account.
+    stealth: bool = False
     #: How many screenshots this profile has taken, so each gets its own file
     #: and an agent comparing before-and-after still has the before.
     shots: int = 0
@@ -393,12 +411,18 @@ class BrowserGateway:
                 # an OSError here escaped `perform` entirely — the agent got an
                 # HTTP 500 instead of the clean error the docstring promises.
                 raise BrowserUnavailable(f"could not make room for {name}: {exc}") from exc
+            identity = _stealth_identity(name)
             try:
-                context = await playwright.chromium.launch_persistent_context(
-                    str(directory),
-                    headless=True,
-                    viewport={"width": 1280, "height": 800},
-                )
+                if identity is not None:
+                    context = await _launch_stealth(identity)
+                else:
+                    context = await playwright.chromium.launch_persistent_context(
+                        str(directory),
+                        headless=True,
+                        viewport={"width": 1280, "height": 800},
+                    )
+            except BrowserUnavailable:
+                raise
             except Exception as exc:
                 raise BrowserUnavailable(f"could not start a browser for {name}: {exc}") from exc
             # Every request, not only the one the agent asked for. A redirect
@@ -420,8 +444,13 @@ class BrowserGateway:
                     _entry.refs = {}
 
             page.on("framenavigated", _forget_refs)
+            entry.stealth = identity is not None
             self._profiles[name] = entry
-            _logger.info("browser gateway: opened profile %s", name)
+            _logger.info(
+                "browser gateway: opened profile %s%s",
+                name,
+                " on its stealth identity" if identity is not None else "",
+            )
             return entry
 
     async def _evict_if_full(self) -> None:
@@ -986,6 +1015,74 @@ async def _guard_request(route: Any, request: Any) -> None:
 #: What a browser profile may be called. Deliberately narrow, and deliberately
 #: *validated* rather than sanitised — see :func:`_canonical`.
 _PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+
+
+def _stealth_identity(name: str) -> Path | None:
+    """
+    The stealth identity for this profile, if one has been provisioned.
+
+    A bot whose canonical profile name matches a directory under
+    :data:`STEALTH_ROOT` drives a CloakBrowser session on that identity instead
+    of a plain Chromium: same Playwright API, a fingerprint pinned by seed, and
+    a ``user-data`` directory that keeps a real signed-in session between runs.
+
+    Opt-in by *existence*, deliberately. There is no flag in a bot definition
+    to forget to set and no way for a definition to ask for one — provisioning
+    an identity is an operator act, done with the ``playwright-stealth-identity``
+    skill, and a bot inherits whatever was provisioned under its own name.
+
+    :param name: The canonical profile name.
+    :returns: The identity directory, or ``None``.
+    """
+    identity = STEALTH_ROOT / name
+    return identity if (identity / "profile.toml").is_file() else None
+
+
+async def _launch_stealth(identity: Path) -> Any:
+    """
+    Open a CloakBrowser context on a provisioned identity.
+
+    Two things make a hand-made login reusable weeks later, and both live in
+    the identity rather than here: ``user-data`` carries the cookies and saved
+    logins, and the seed carries the device. Without ``--fingerprint`` the
+    binary rolls a new device every launch, so a site that fingerprints the
+    session re-verifies every time — which for a bot that is supposed to *have*
+    a session is the whole failure.
+
+    **Headful, and not negotiable.** The identity's own profile says so:
+    headless leaks GPU, display and timing signals even with the patches
+    applied. A gateway that quietly forced headless would be defeating the
+    thing it was asked to run.
+
+    :param identity: The identity directory.
+    :returns: A Playwright browser context.
+    :raises BrowserUnavailable: When the toolchain or identity is unusable.
+    """
+    try:
+        import tomllib
+        from cloakbrowser import launch_persistent_context_async
+    except ImportError as exc:  # pragma: no cover - depends on the extra
+        raise BrowserUnavailable(
+            f"{identity.name} has a stealth identity but CloakBrowser is not installed: "
+            "run the playwright-stealth-setup skill"
+        ) from exc
+
+    profile = tomllib.loads((identity / "profile.toml").read_text())
+    seed = int(profile.get("identity", {}).get("seed") or 0)
+    if not seed:
+        # The identity skill refuses to leave a seed unset; if one reaches here
+        # anyway, launching would silently give the bot a new device each run.
+        raise BrowserUnavailable(f"{identity.name} has no fingerprint seed pinned")
+    quota = int(profile.get("identity", {}).get("storage_quota_mb") or 0)
+    args = [f"--fingerprint={seed}"]
+    if quota:
+        args.append(f"--fingerprint-storage-quota={quota}")
+    return await launch_persistent_context_async(
+        str(identity / "user-data"),
+        headless=bool(profile.get("browser", {}).get("headless", False)),
+        args=args,
+        viewport={"width": 1280, "height": 800},
+    )
 
 
 def _canonical(profile: str) -> str:
