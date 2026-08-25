@@ -19,7 +19,7 @@ from army.bots.approvals import ApprovalStore
 from army.bots.messages import MessageStore
 from army.bots.store import BotStore
 from army.bots.web import BotsSite
-from army.bots.wheel import DEFAULT_LEASE_S, REFUSAL, WheelStore
+from army.bots.wheel import DEFAULT_LEASE_S, HANDBACK, REFUSAL, WheelStore
 from army.store import Store
 from tests.army.bots.conftest import activate, make_bot
 
@@ -83,13 +83,28 @@ def test_releasing_hands_the_browser_back(site: BotsSite, bots: BotStore) -> Non
     assert site.wheel_for_profile(PROFILE, now=NOW) == ""
 
 
-def test_a_closed_laptop_is_not_a_stuck_bot(site: BotsSite, bots: BotStore) -> None:
-    """A lease, not a flag. Somebody takes the wheel and goes to lunch."""
+def test_a_lapsed_hold_does_not_hand_the_wheel_back(site: BotsSite, bots: BotStore) -> None:
+    """The lease used to return the wheel on its own. That trade was backwards.
+
+    It was insurance against a closed laptop bricking a bot. But the moment a
+    hold lapses is exactly the moment the person may be mid-login, and the
+    bot's first act would be to snapshot the form they are typing into —
+    silently. A bot waiting on a hand-back is a visible stop; a bot resuming on
+    a live session is the one failure nobody forgives.
+    """
     _watcher(bots)
     site.wheel({"bot": ["watcher"], "action": ["take"]}, now=NOW)
 
     assert site.wheel_for_profile(PROFILE, now=NOW + DEFAULT_LEASE_S - 1) == REFUSAL
-    assert site.wheel_for_profile(PROFILE, now=NOW + DEFAULT_LEASE_S + 1) == ""
+    # Still refused, and with a different sentence: "wait, somebody is driving"
+    # and "nobody is driving and nobody has said you may" are different
+    # situations, and only the second needs a person to clear it.
+    lapsed = site.wheel_for_profile(PROFILE, now=NOW + DEFAULT_LEASE_S + 1)
+    assert lapsed == HANDBACK
+    assert "waiting on a hand-back" in lapsed
+
+    site.wheel({"bot": ["watcher"], "action": ["release"]}, now=NOW + DEFAULT_LEASE_S + 2)
+    assert site.wheel_for_profile(PROFILE, now=NOW + DEFAULT_LEASE_S + 3) == ""
 
 
 def test_one_persons_wheel_does_not_refuse_another_bot(site: BotsSite, bots: BotStore) -> None:

@@ -69,7 +69,7 @@ def _token() -> str | None:
 WHEEL_LEASE_S = 900.0
 
 
-async def wheel_refusal_for_profile(profile: str) -> str:
+async def wheel_refusal_for_profile(profile: str) -> tuple[str, bool]:
     """
     Whether a person has taken the browser this action would drive.
 
@@ -82,11 +82,12 @@ async def wheel_refusal_for_profile(profile: str) -> str:
     rather than a boundary.
 
     :param profile: The browser profile the action would drive.
-    :returns: The refusal text, or ``""`` to proceed.
+    :returns: ``(refusal, lapsed)`` — the text to hand back, and whether the
+        hold has passed its lease and is waiting on an explicit hand-back.
     """
     token = _token()
     if token is None or not profile:
-        return ""
+        return "", False
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(
@@ -94,10 +95,11 @@ async def wheel_refusal_for_profile(profile: str) -> str:
                 headers={"Authorization": f"Bearer {token}"},
             )
         if response.status_code != 200:
-            return ""
-        return str(response.json().get("refuse") or "")
+            return "", False
+        answer = response.json()
+        return str(answer.get("refuse") or ""), bool(answer.get("lapsed"))
     except (httpx.HTTPError, ValueError):
-        return ""
+        return "", False
 
 
 def create_bots_router(*, auth_provider: AuthProvider | None = None) -> APIRouter:

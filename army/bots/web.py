@@ -36,7 +36,7 @@ from army.bots.roster import RosterEntry, roster, summarise
 from army.bots.schedule import first_wake
 from army.bots.spawn import SpawnRefused
 from army.bots.store import BotStore
-from army.bots.wheel import REFUSAL, canonical_profile
+from army.bots.wheel import HANDBACK, REFUSAL, canonical_profile
 from army.bots.workspace import Workspace
 from army.egress import LinkRefused, approval_in
 from army.gates import GateRefused, digest
@@ -660,7 +660,11 @@ class BotsSite:
         for bot_id in held:
             bot = self.bots.get(bot_id)
             if bot is not None and canonical_profile(bot.browser_profile or "") == wanted:
-                return REFUSAL
+                # A lapsed hold is still a hold: it refuses with a different
+                # sentence, because "wait, somebody is driving" and "nobody is
+                # driving and nobody has said you may" are different situations
+                # and only the second needs a person to clear it.
+                return HANDBACK if held[bot_id].held_until <= now else REFUSAL
         return ""
 
     def wheel(self, form: dict[str, list[str]], *, now: int) -> tuple[str, str]:
@@ -1330,7 +1334,11 @@ class _Handler(BaseHTTPRequestHandler):
             # The browser profile, URL-quoted: it contains a colon.
             profile = unquote(route.path.removeprefix("/api/wheel/"))
             refusal = self.site.wheel_for_profile(profile, now=now)
-            self._send(200, json.dumps({"refuse": refusal}), "application/json")
+            self._send(
+                200,
+                json.dumps({"refuse": refusal, "lapsed": refusal == HANDBACK}),
+                "application/json",
+            )
         elif route.path.startswith("/api/files/"):
             payload = self.site.files_json(
                 route.path.removeprefix("/api/files/"),

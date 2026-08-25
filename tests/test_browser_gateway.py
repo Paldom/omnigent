@@ -655,12 +655,25 @@ async def test_handing_back_lets_the_bot_drive_again(gateway: BrowserGateway) ->
     assert (await gateway.perform("test", "snapshot", {}))["ok"] is True
 
 
-async def test_a_closed_laptop_is_not_a_stuck_browser(gateway: BrowserGateway) -> None:
-    """A time, not a flag: a control plane that dies mid-hold must not brick it."""
+async def test_a_lapsed_hold_says_so_instead_of_resuming(gateway: BrowserGateway) -> None:
+    """Expiry converts a hold into a hand-back nobody has performed yet.
+
+    The lease was insurance against a closed laptop bricking a bot. For a
+    browser holding somebody's signed-in session that runs the wrong way: the
+    moment it lapses is the moment they may be mid-login, and the bot's first
+    act would be to read the form. The bot is not stuck — its run ends and
+    surfaces in "needs you" — it just does not resume by itself.
+    """
     await gateway.perform("test", "navigate", {"url": _url(PAGE)})
     gateway.hold("test", seconds=0)
 
-    assert gateway.driven_by_a_person("test") is False
+    assert gateway.driven_by_a_person("test") is True
+    assert gateway.handback_pending("test") is True
+    result = await gateway.perform("test", "snapshot", {})
+    assert result["ok"] is False
+    assert "has not handed it back" in result["error"]
+
+    gateway.release("test")
     assert (await gateway.perform("test", "snapshot", {}))["ok"] is True
 
 

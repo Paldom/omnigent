@@ -258,6 +258,20 @@ WHEEL_REFUSAL = (
 )
 
 
+#: What a bot is told once a person's hold has lapsed but nobody has handed
+#: the browser back. Different from :data:`WHEEL_REFUSAL` on purpose: the first
+#: is "wait, somebody is driving", this is "nobody is driving and nobody has
+#: said you may" — which is a thing a person has to clear, and the bot should
+#: say so in its reply rather than sit in a retry loop waiting for a clock.
+HANDBACK_REFUSAL = (
+    "A person took the wheel of this browser and has not handed it back. The "
+    "hold has lapsed, but it is not returned automatically: they may have "
+    "signed in to something, and resuming on a page somebody is still using is "
+    "not a thing to do quietly. Say in your reply that you are waiting on a "
+    "hand-back, and stop."
+)
+
+
 class BrowserUnavailable(RuntimeError):
     """Playwright is not installed, or no browser could be started."""
 
@@ -514,12 +528,35 @@ class BrowserGateway:
 
     def driven_by_a_person(self, profile: str) -> bool:
         """
-        Whether a person holds this browser right now.
+        Whether a bot's actions on this browser must still be refused.
+
+        A lapsed hold does **not** hand the wheel back. The lease started as
+        insurance against a closed laptop bricking a bot, and for a device
+        holding somebody's signed-in session that trade is the wrong way round:
+        at the moment it expires the person may be mid-login, and the bot's
+        first act would be to snapshot the form they are typing into. Silently
+        resuming there is the one failure nobody forgives.
+
+        So expiry converts a hold into a hand-back nobody has performed yet.
+        The bot stays refused with a different sentence, the run ends and
+        surfaces in "needs you", and one click clears it. That is visible,
+        which the alternative — a bot quietly resuming on a live session — is
+        not.
 
         :param profile: Whose browser.
         :returns: Whether a bot's actions must be refused.
         """
-        return self._held.get(_canonical(profile), 0.0) > time.monotonic()
+        return _canonical(profile) in self._held
+
+    def handback_pending(self, profile: str) -> bool:
+        """
+        Whether a hold has lapsed and nobody has handed the browser back.
+
+        :param profile: Whose browser.
+        :returns: Whether the hold is past its lease.
+        """
+        held_until = self._held.get(_canonical(profile))
+        return held_until is not None and held_until <= time.monotonic()
 
     async def perform(self, profile: str, action: str, args: dict[str, Any]) -> dict[str, Any]:
         """
@@ -545,7 +582,10 @@ class BrowserGateway:
             # it queued. It cannot abort one already running — that would need
             # a cancel the page has no notion of — but nothing new starts.
             if self.driven_by_a_person(profile):
-                result = {"ok": False, "error": WHEEL_REFUSAL}
+                result = {
+                    "ok": False,
+                    "error": HANDBACK_REFUSAL if self.handback_pending(profile) else WHEEL_REFUSAL,
+                }
                 self._record(entry, action, args, result)
                 return result
             try:

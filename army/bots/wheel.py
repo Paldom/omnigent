@@ -40,10 +40,22 @@ CREATE TABLE IF NOT EXISTS browser_wheel (
 );
 """
 
-#: How long one grab of the wheel lasts before it falls back to the bot.
-#: Long enough to log in to something and read a page; short enough that a
-#: closed laptop is not a stuck bot.
+#: How long one grab of the wheel lasts before it *lapses*. Not before it
+#: returns: a lapsed hold still refuses the bot, and only an explicit hand-back
+#: gives the browser back. Long enough to sign in to something and read a page;
+#: past it, the bot says it is waiting on a hand-back instead of resuming on a
+#: page somebody may still be using.
 DEFAULT_LEASE_S = 900
+
+#: What a bot is told once the hold has lapsed and nobody has handed the
+#: browser back. Mirrors ``omnigent.browser.gateway.HANDBACK_REFUSAL``.
+HANDBACK = (
+    "A person took the wheel of this browser and has not handed it back. The "
+    "hold has lapsed, but it is not returned automatically: they may have "
+    "signed in to something, and resuming on a page somebody is still using is "
+    "not a thing to do quietly. Say in your reply that you are waiting on a "
+    "hand-back, and stop."
+)
 
 #: What a refused bot is told. Written for an agent rather than a log: it says
 #: what happened, that waiting is correct, and that retrying is not.
@@ -162,36 +174,40 @@ class WheelStore:
         with self.bots._tx(conn) as conn:
             conn.execute("DELETE FROM browser_wheel WHERE bot_id = ?", (bot_id,))
 
-    def held_by(self, bot_id: str, *, now: int) -> Wheel | None:
+    def held_by(self, bot_id: str, *, now: int) -> Wheel | None:  # noqa: ARG002
         """
         Who is driving, or ``None`` when the bot is.
 
-        An expired hold reads as ``None`` rather than being cleaned up first,
-        so a reader never has to write and the answer cannot depend on whether
-        anybody has swept recently.
+        A lapsed hold still reads as held. The lease began as insurance
+        against a closed laptop bricking a bot; for a browser holding somebody
+        signed-in session that trade runs the wrong way, because the moment it
+        lapses is the moment they may be mid-login. So the lease marks when a
+        hold *lapsed* — after which the browser is waiting on a hand-back
+        nobody has performed — and only an explicit release returns it. The bot
+        is not stuck: its run ends and surfaces in "needs you", which is a
+        visible stop rather than a quiet resumption on a live session.
 
         :param bot_id: Whose browser.
-        :param now: Epoch seconds.
-        :returns: The live hold, or ``None``.
+        :param now: Unused — kept because every caller has a clock and reads
+            ``held_until`` against it to tell a live hold from a lapsed one.
+            The lapse is the caller's judgement now, not this query's.
+        :returns: The hold, live or lapsed, or ``None``.
         """
         with self.store.atomic() as conn:
             row = conn.execute(
-                "SELECT * FROM browser_wheel WHERE bot_id = ? AND held_until > ?",
-                (bot_id, now),
+                "SELECT * FROM browser_wheel WHERE bot_id = ?", (bot_id,)
             ).fetchone()
         return _row(row) if row is not None else None
 
-    def all_held(self, *, now: int) -> dict[str, Wheel]:
+    def all_held(self, *, now: int) -> dict[str, Wheel]:  # noqa: ARG002
         """
         Every live hold, for the roster — one query, not one per bot.
 
-        :param now: Epoch seconds.
-        :returns: ``{bot_id: Wheel}``.
+        :param now: Unused — see :meth:`held_by`.
+        :returns: ``{bot_id: Wheel}``, live and lapsed alike.
         """
         with self.store.atomic() as conn:
-            rows = conn.execute(
-                "SELECT * FROM browser_wheel WHERE held_until > ?", (now,)
-            ).fetchall()
+            rows = conn.execute("SELECT * FROM browser_wheel").fetchall()
         return {row["bot_id"]: _row(row) for row in rows}
 
 

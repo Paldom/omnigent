@@ -140,13 +140,17 @@ def register_browser_routes(
         try:
             from omnigent.server.routes.bots import WHEEL_LEASE_S, wheel_refusal_for_profile
 
-            held = bool(await wheel_refusal_for_profile(profile))
+            refusal, lapsed = await wheel_refusal_for_profile(profile)
+            held = bool(refusal)
         except Exception:
             _logger.debug("could not read the wheel ledger for %s", profile, exc_info=True)
             return
         _wheel_synced_at[profile] = now
         if held:
-            gateway.hold(profile, seconds=WHEEL_LEASE_S)
+            # `seconds=0` for a lapsed hold, or every sync would silently renew
+            # the lease and the browser would never reach the state a person
+            # has to clear.
+            gateway.hold(profile, seconds=0 if lapsed else WHEEL_LEASE_S)
         else:
             gateway.release(profile)
 
