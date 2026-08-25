@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from army.bots.approvals import ApprovalRefused, ApprovalStore
+from army.bots.approvals import ApprovalRefused, ApprovalState, ApprovalStore
 from army.bots.budget import BudgetExhausted
 from army.bots.messages import MessageKind, MessageStore
 from army.bots.model import MAX_DEPTH, MAX_FANOUT, BotStatus, DerivedStatus
@@ -38,6 +38,7 @@ from army.bots.spawn import SpawnRefused
 from army.bots.store import BotStore
 from army.bots.wheel import REFUSAL, canonical_profile
 from army.bots.workspace import Workspace
+from army.egress import LinkRefused, approval_in
 from army.gates import GateRefused, digest
 from army.store import ConcurrentTransition, Store
 
@@ -197,6 +198,7 @@ class BotsSite:
         workspace: Workspace | None = None,
         wheels: Any = None,
         reactions: Any = None,
+        link_secret: str = "",
     ) -> None:
         self.store = store
         self.bots = bots
@@ -208,6 +210,9 @@ class BotsSite:
         self.workspace = workspace if workspace is not None else Workspace(bots)
         self.wheels = wheels
         self.reactions = reactions
+        #: Signs the scoped links a chat nudge carries. Empty means this
+        #: control plane issues none and verifies none.
+        self.link_secret = link_secret
 
     def authorises(self, supplied: str) -> bool:
         """
@@ -717,6 +722,86 @@ class BotsSite:
             payload={"held_until": held.held_until},
         )
         return "You have the wheel. Its browser actions are refused until you release it.", ""
+
+    def confirm(self, token: str, *, now: int) -> tuple[int, str, str]:
+        """
+        Render one approval for somebody who arrived from a chat link.
+
+        A page, not an action. Chat clients fetch every URL they unfurl, so
+        anything this did on ``GET`` would be done by a link-preview crawler
+        moments after the message was posted — from inside the network, with no
+        person involved. So this shows the question and two buttons that
+        ``POST``; the crawler sees the question and changes nothing.
+
+        :param token: The scoped link token.
+        :param now: Epoch seconds.
+        :returns: ``(status, body, content type)``.
+        """
+        try:
+            approval_id = approval_in(self.link_secret, token, now=now)
+        except LinkRefused as exc:
+            return 403, _page("Refused", f"<h1>{_esc(str(exc))}</h1>"), _HTML
+        request = self.approvals.get(approval_id)
+        if request is None or request.state is not ApprovalState.PENDING:
+            return (
+                200,
+                _page(
+                    "Already answered",
+                    "<h1>That question has already been answered.</h1>"
+                    "<p class=sm mut>Nothing to do.</p>",
+                ),
+                _HTML,
+            )
+        buttons = (
+            "".join(
+                f'<button class="btn{" primary" if choice == request.options[0] else ""}"'
+                f' name=choice value="{_esc(choice)}">{_esc(choice)}</button>'
+                for choice in request.options
+            )
+            or '<button class="btn primary" name=choice value="">approve</button>'
+        )
+        return (
+            200,
+            _page(
+                "Waiting on you",
+                f"<h1>{_esc(request.question)}</h1>"
+                f'<form method=post action="/approve">'
+                f'<input type=hidden name=t value="{_esc(token)}">'
+                f"<div class=acts>{buttons}"
+                f"<button class=btn name=deny value=1>deny</button></div></form>"
+                "<p class=foot>This link answers this one question and nothing else.</p>",
+            ),
+            _HTML,
+        )
+
+    def decide_by_link(self, form: dict[str, list[str]], *, now: int) -> tuple[str, str]:
+        """
+        Answer one approval using a scoped link token.
+
+        The token stands in for the page's own and for nothing else: it names
+        one approval, so a link pasted in a chat room cannot answer a different
+        question later.
+
+        :param form: ``t``, and ``choice`` or ``deny``.
+        :param now: Epoch seconds.
+        :returns: ``(notice, problem)``, one of which is empty.
+        """
+        try:
+            approval_id = approval_in(self.link_secret, _first(form, "t"), now=now)
+        except LinkRefused as exc:
+            return "", str(exc)
+        # Answered through the same code path the page uses, so the bindings,
+        # the audit trail and the successor wake cannot drift from it.
+        denied = bool(_first(form, "deny"))
+        return self.verdict(
+            {
+                "approval": [approval_id],
+                "choice": [] if denied else [_first(form, "choice")],
+                "decision": ["deny" if denied else "approve"],
+                "token": [self.token],
+            },
+            now=now,
+        )
 
     def react(self, form: dict[str, list[str]], *, now: int) -> tuple[str, str]:
         """
@@ -1228,6 +1313,14 @@ class _Handler(BaseHTTPRequestHandler):
         route = urlparse(self.path)
         params = parse_qs(route.query)
         now = int(time.time())
+        if route.path == "/approve":
+            # Reachable with a scoped link token instead of the page's own.
+            # Deliberately renders and decides nothing: chat clients GET every
+            # URL they unfurl, so a link that approved on GET would be approved
+            # by the preview crawler, seconds after posting, from inside the
+            # network. An approval a link-preview bot can grant is not one.
+            self._send(*self.site.confirm(_first(params, "t"), now=now))
+            return
         if not self.site.authorises(self._token(params)):
             self._refuse()
             return
@@ -1316,6 +1409,9 @@ class _Handler(BaseHTTPRequestHandler):
             "/say": self.site.say,
             "/wheel": self.site.wheel,
             "/react": self.site.react,
+            # Present so the dispatcher finds the path; the handler above
+            # answers it before this table is consulted.
+            "/approve": None,
         }
         action = actions.get(route.path)
         if action is None:
@@ -1329,6 +1425,19 @@ class _Handler(BaseHTTPRequestHandler):
             return
         form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
         form.update(parse_qs(route.query))
+        if route.path == "/approve":
+            # The scoped token stands in for the page token, and for nothing
+            # else: it names one approval and cannot answer another.
+            notice, problem = self.site.decide_by_link(form, now=int(time.time()))
+            self._send(
+                200,
+                _page(
+                    "Recorded" if notice else "Refused",
+                    f"<h1>{_esc(notice or problem)}</h1><p class=sm mut>You can close this.</p>",
+                ),
+                _HTML,
+            )
+            return
         if not self.site.authorises(self._token(form)):
             self._refuse()
             return

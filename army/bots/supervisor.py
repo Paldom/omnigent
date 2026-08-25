@@ -34,6 +34,7 @@ from army.bots.reactions import ReactionStore, briefing
 from army.bots.registry import WorkloadRefused, WorkloadRegistry
 from army.bots.schedule import Wake, next_wake
 from army.bots.store import BotStore
+from army.egress import Egress
 from army.lanes import Lanes
 from army.omni import OmniClient, OmniError, barrier_marker
 from army.state import Command, Run, RunState
@@ -130,6 +131,7 @@ class BotSupervisor(Supervisor):
         approvals: ApprovalStore | None = None,
         budgets: BudgetStore | None = None,
         reactions: ReactionStore | None = None,
+        egress: Egress | None = None,
     ) -> None:
         super().__init__(
             store,
@@ -157,6 +159,9 @@ class BotSupervisor(Supervisor):
         # works without it; when present, marks reach the bot in its brief
         # rather than living only in a UI.
         self.reactions = reactions
+        # Where to nudge a person, or ``None``. Absent configuration is the off
+        # switch: a fleet with no webhook behaves exactly as it did before.
+        self.egress = egress
         #: Bots already reported as stalled, so the alarm fires on the change
         #: rather than on every tick.
         self._alarmed: set[str] = set()
@@ -769,6 +774,21 @@ class BotSupervisor(Supervisor):
                 # Owed to a person, so it shows up in "what needs you" until
                 # somebody actually answers it.
                 deliver_to=["human:owner"],
+            )
+
+        # Told where they already are. On the write that parks the run, not on
+        # a sweep that could be forgotten to run: a bot waiting on a question
+        # is correct and completely invisible, and the fleet working while
+        # nobody knows is the thing an operator feels hourly.
+        #
+        # Best effort by construction. The approval row is the truth; this
+        # carries a link and no authority, and losing it costs a nudge.
+        if self.egress is not None and self.egress.enabled():
+            self.egress.notify(
+                bot=bot.slug if (bot := self.bots.get(run.bot_id or "")) else "a bot",
+                question=question,
+                evidence=evidence,
+                link=self.egress.link_for(request.id, now=now),
             )
         return request
 

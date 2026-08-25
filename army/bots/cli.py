@@ -85,6 +85,7 @@ def _fleet(config: Config) -> tuple[Store, BotStore, BotSupervisor]:
         approvals=ApprovalStore(bots, owner_broker(bots), messages=messages),
         budgets=BudgetStore(bots),
         reactions=ReactionStore(bots),
+        egress=config.egress,
     )
     return store, bots, supervisor
 
@@ -619,6 +620,7 @@ def cmd_serve(config: Config, args: argparse.Namespace) -> int:
         workspace=Workspace(bots),
         wheels=WheelStore(bots),
         reactions=ReactionStore(bots),
+        link_secret=config.egress.secret,
     )
     server = serve(site, host=args.host, port=args.port)
     # The link carries the token so it can be opened on a phone. It is also the

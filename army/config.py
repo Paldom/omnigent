@@ -19,6 +19,7 @@ from typing import Any
 
 import tomllib
 
+from army.egress import Egress
 from army.lanes import DEFAULT_LANES, DEFAULT_LIMIT_PHRASES
 from army.workload import Workload
 
@@ -40,6 +41,8 @@ class Config:
     :param workload: Dotted path to the workload, e.g.
         ``"army.workloads.demo:DemoWorkload"``.
     :param workload_options: Keyword arguments for the workload's constructor.
+    :param egress: Where to nudge a person about a waiting question. Absent
+        is the off switch: a fleet with no webhook behaves as it did before.
     :param lanes: Per-harness concurrency caps.
     :param max_concurrent_runs: Iterations allowed in flight at once.
     :param limit_phrases: Text that means a vendor refused on quota. Vendor
@@ -57,6 +60,7 @@ class Config:
     state_path: Path = Path.home() / ".omnigent" / "army" / "army.db"
     workload: str = "army.workloads.demo:DemoWorkload"
     workload_options: dict[str, Any] = field(default_factory=dict)
+    egress: Egress = field(default_factory=Egress)
     lanes: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_LANES))
     max_concurrent_runs: int = 3
     limit_phrases: tuple[str, ...] = DEFAULT_LIMIT_PHRASES
@@ -109,6 +113,13 @@ def load_config(path: Path | None = None) -> Config:
         config.max_concurrent_runs = int(army["max_concurrent_runs"])
     if isinstance(data.get("workload_options"), dict):
         config.workload_options = dict(data["workload_options"])
+    nudge = data.get("egress")
+    if isinstance(nudge, dict):
+        config.egress = Egress(
+            webhook_url=str(nudge.get("webhook_url") or ""),
+            secret=str(nudge.get("secret") or ""),
+            public_url=str(nudge.get("public_url") or ""),
+        )
     if isinstance(data.get("lanes"), dict):
         config.lanes = {str(k): int(v) for k, v in data["lanes"].items()}
     rate_limit = data.get("rate_limit")

@@ -110,6 +110,13 @@ going to look for one, which is the interesting half — and the executor refuse
 to type into a password or one-time-code field regardless of what the page
 argues. The instruction is backed by a mechanism, not by hope.
 
+**Tell you where you already are.** Set `[egress]` in `army.toml` and a bot
+parking on a question posts to one webhook with a link. The link answers that
+one question, expires, and lands on a confirm page — never a one-click approve,
+because chat clients fetch every URL they unfurl and a preview crawler would
+click it from inside your network. Nothing inbound: the half of a chat
+integration that rots is bot users and event subscriptions, so it is not built.
+
 **Decline to ask.** The commonest outcome is `UNCHANGED`, which costs a backoff
 rather than your attention, and widens the interval on its own. A crew that
 reports every morning is a crew nobody reads by Thursday — and then the silence

@@ -40,3 +40,20 @@ allow_workloads = [
     "army.bots.workloads.watch:WatchWorkload",
     "army.bots.workloads.research:ResearchWorkload",
 ]
+
+# Where to nudge a person when a bot parks on a question. Optional, and absent
+# is the off switch — a fleet without this behaves exactly as it did before.
+#
+# Outbound only, and deliberately so: the half of a chat integration that rots
+# is the inbound half (bot users, event subscriptions, message parsing). One
+# incoming-webhook URL is the entire surface here.
+#
+# The link is scoped to the one approval it was sent about and expires. It
+# lands on a confirm page rather than deciding on GET, because chat clients
+# fetch every URL they unfurl — a one-click approve link is clicked by the
+# preview crawler, from inside your network, seconds after posting.
+#
+# [egress]
+# webhook_url = "https://hooks.slack.com/services/..."
+# secret = "something long and random"
+# public_url = "https://your-tailnet-name"
