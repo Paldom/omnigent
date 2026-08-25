@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import time
 from typing import Any
 
 from fastapi import (
@@ -65,6 +66,14 @@ from omnigent.stores.permission_store import PermissionStore
 #: Its presence is what routes an action to the gateway instead of the desktop.
 _BROWSER_PROFILE_LABEL = "omnigent.browser.profile"
 
+#: How stale the gateway's copy of who-holds-the-wheel may get. Small enough
+#: that a phone taking the wheel stops the bot before the next page loads,
+#: large enough that it is not a round trip per click.
+WHEEL_SYNC_S = 5.0
+
+#: When each profile last agreed with the ledger.
+_wheel_synced_at: dict[str, float] = {}
+
 _logger = logging.getLogger(__name__)
 
 
@@ -99,35 +108,47 @@ def register_browser_routes(
         profile = labels.get(_BROWSER_PROFILE_LABEL)
         return str(profile) if profile else None
 
-    async def _seed_wheel_from_the_ledger(gateway: Any, profile: str) -> None:
+    async def _sync_wheel_with_the_ledger(gateway: Any, profile: str) -> None:
         """
-        Ask the control plane once, when a browser is about to be opened.
+        Keep the gateway's hold in step with the durable ledger.
 
-        The gateway's own hold is what refuses an action, and it is lost when
-        this server restarts — while the ledger, which is the durable record,
-        still says a person is driving. So a restart in the middle of somebody's
-        sign-in would hand the browser back to the bot without anyone saying so.
+        The gateway's own hold is what refuses an action, and it is set by the
+        proxy route when somebody takes the wheel *through this server*. The
+        standalone control-plane page — the one that opens on a phone over the
+        tailnet, which is the whole reason the approval path works from one —
+        writes only to SQLite. So taking the wheel from your phone left the bot
+        driving, and handing it back through this server while the phone still
+        held it would have been just as wrong in the other direction.
 
-        Asked only when the profile is not already resident, so this is once per
-        browser launch rather than once per action: per-action was a round trip
-        that failed open and left a window between the answer and the click.
+        Re-asked at most every :data:`WHEEL_SYNC_S`, not per action: per-action
+        was an HTTP round trip in front of every click, and the window it left
+        between answering and acting was the bug that moved the hold in here in
+        the first place. Between syncs the local value stands, so the worst case
+        is a few seconds of staleness rather than never noticing.
 
-        It can only ever *add* a hold, never clear one. That is what makes
-        failing open safe here — an unreachable control plane cannot talk the
-        gateway out of a refusal it already knows about.
+        An unreachable control plane leaves the last known answer alone. That is
+        what keeps failing open safe: it cannot talk the gateway out of a
+        refusal it already knows about, it can only fail to tell it about a new
+        one.
 
         :param gateway: The browser gateway.
         :param profile: The browser about to be driven.
         """
-        if profile in gateway.resident() or gateway.driven_by_a_person(profile):
+        now = time.monotonic()
+        if now - _wheel_synced_at.get(profile, 0.0) < WHEEL_SYNC_S:
             return
         try:
             from omnigent.server.routes.bots import WHEEL_LEASE_S, wheel_refusal_for_profile
 
-            if await wheel_refusal_for_profile(profile):
-                gateway.hold(profile, seconds=WHEEL_LEASE_S)
+            held = bool(await wheel_refusal_for_profile(profile))
         except Exception:
             _logger.debug("could not read the wheel ledger for %s", profile, exc_info=True)
+            return
+        _wheel_synced_at[profile] = now
+        if held:
+            gateway.hold(profile, seconds=WHEEL_LEASE_S)
+        else:
+            gateway.release(profile)
 
     @router.post(
         "/sessions/{session_id}/browser/action_request",
@@ -187,7 +208,7 @@ def register_browser_routes(
             # and still have the bot snapshot the form they were typing into.
             from omnigent.browser import gateway as _browser_gateway
 
-            await _seed_wheel_from_the_ledger(_browser_gateway(), profile)
+            await _sync_wheel_with_the_ledger(_browser_gateway(), profile)
             return await _browser_gateway().perform(profile, action, args)
 
         action_id = f"baction_{secrets.token_hex(16)}"

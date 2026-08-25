@@ -175,6 +175,10 @@ class OmniClient:
         self.token = token
         self.timeout = timeout
         self.default_labels = dict(default_labels or {})
+        #: Prepended to the first message of every session this client opens.
+        #: See :meth:`with_briefing`.
+        self.preamble: str = ""
+        self._prefaced: set[str] = set()
         #: The host answered by :meth:`default_host`, remembered so filling in
         #: a missing one costs a request per client rather than per session.
         self._host: str | None = None
@@ -199,6 +203,7 @@ class OmniClient:
             default_labels={**self.default_labels, **labels},
         )
         clone._host = self._host
+        clone.preamble = self.preamble
         return clone
 
     def _request(
@@ -356,7 +361,18 @@ class OmniClient:
 
     def send(self, session_id: str, text: str) -> None:
         """
-        Send a message to a session.
+        Send a message to a session, prefaced once by this run's briefing.
+
+        The preface is prepended here rather than by each workload, for the
+        reason the browser label taught: a thing every body needs is a thing
+        some workload will forget. ``memory.assemble`` had *no caller at all*
+        — 269 lines whose own docstring says that without them "there is no
+        memory, just a persona re-read from a row" — because every workload
+        wrote its own brief and none of them asked for it.
+
+        Once per session, not once per send: a workload that sends twice is
+        continuing a conversation, and repeating the persona at it reads as the
+        operator repeating themselves.
 
         ``content`` is a list of typed parts, not a bare string — the same
         shape the UI posts, so an agent sees an identical message however it
@@ -365,6 +381,9 @@ class OmniClient:
         :param session_id: Session to send to.
         :param text: The message.
         """
+        if self.preamble and session_id not in self._prefaced:
+            self._prefaced.add(session_id)
+            text = f"{self.preamble}\n\n---\n\n{text}"
         self._request(
             "POST",
             f"/v1/sessions/{session_id}/events",
@@ -394,6 +413,48 @@ class OmniClient:
             if session.get("title") == title:
                 return str(session["id"])
         return None
+
+    def with_briefing(self, preamble: str) -> OmniClient:
+        """
+        A client that prefaces each session it opens with *preamble*.
+
+        :param preamble: The briefing text.
+        :returns: A client sharing this one's connection settings.
+        """
+        clone = OmniClient(
+            self.base_url, self.token, self.timeout, default_labels=self.default_labels
+        )
+        clone._host = self._host
+        clone.preamble = preamble
+        return clone
+
+    def open_once(self, run_id: str, agent_id: str, *, title: str, **kwargs: Any) -> str:
+        """
+        Open this run's session, or hand back the one it already opened.
+
+        The crash this closes: ``dispatch`` creates a session, the process dies
+        before the run reaches ``COLLECTING``, and the next tick calls
+        ``dispatch`` again — orphaning the first session and paying for a second
+        agent turn on the same work. The loop's recovery story is "the run is
+        still in COLLECTING and the next tick collects it", and that is only
+        true for the states *after* this one.
+
+        :meth:`find_session` was written for this and only a demo workload ever
+        called it, so both real workloads had the bug. Putting it here rather
+        than in each workload is the difference between a fix and a convention.
+
+        The run id is in the title on purpose. A watcher's own title is the page
+        it watches, which is identical every iteration — deduplicating on that
+        would hand a bot the session from *last* week and never open a new one.
+
+        :param run_id: The run opening a session.
+        :param agent_id: The agent to bind.
+        :param title: What the session is doing, minus the run id.
+        :param kwargs: Passed to :meth:`create_session`.
+        :returns: The session id.
+        """
+        marked = f"{title} · {run_id[:8]}"
+        return self.find_session(marked) or self.create_session(agent_id, title=marked, **kwargs)
 
     def replies_after(self, session_id: str, marker: str) -> list[str]:
         """

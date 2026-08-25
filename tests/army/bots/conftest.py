@@ -46,6 +46,16 @@ class FakeOmni:
         self.labelled: list[dict[str, str]] = []
         #: Every ``create_session`` call's host, in order.
         self.hosts: list[str | None] = []
+        #: Session id by title, so ``find_session`` answers like the server.
+        self.titles: dict[str, str] = {}
+        #: What the framework prefaced this run's body with — the assembled
+        #: memory. Recorded because "the briefing reaches the body" is the
+        #: whole claim, and it was false for as long as nothing checked.
+        self.preamble: str = ""
+
+    def with_briefing(self, preamble: str) -> FakeOmni:
+        self.preamble = preamble
+        return self
 
     def with_labels(self, labels: dict[str, str]) -> FakeOmni:
         self.default_labels = {**self.default_labels, **labels}
@@ -54,6 +64,10 @@ class FakeOmni:
     def create_session(self, agent_id: str, **kwargs: Any) -> str:
         session_id = f"conv_{len(self.sessions):032d}"
         self.sessions.append(session_id)
+        # Titles are how the server makes session creation idempotent, so a
+        # fake that forgets them cannot show a re-dispatch reusing one.
+        if kwargs.get("title"):
+            self.titles[str(kwargs["title"])] = session_id
         self.labelled.append({**self.default_labels, **(kwargs.get("labels") or {})})
         #: What each session was pinned to. A session with no host gets no
         #: runner and fails in a way that reads like a broken harness.
@@ -82,8 +96,12 @@ class FakeOmni:
     def was_told(self, session_id: str, text: str) -> bool:
         return True
 
+    def open_once(self, run_id: str, agent_id: str, *, title: str, **kwargs: Any) -> str:
+        marked = f"{title} · {run_id[:8]}"
+        return self.find_session(marked) or self.create_session(agent_id, title=marked, **kwargs)
+
     def find_session(self, title: str) -> str | None:
-        return None
+        return self.titles.get(title)
 
     def resolve_agent(self, name_or_id: str) -> str:
         return f"ag_{name_or_id}"

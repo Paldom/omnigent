@@ -153,7 +153,12 @@ def cmd_verdict(config: Config, args: argparse.Namespace) -> int:
             choice=getattr(args, "choice", None),
             # Re-checked against the run as it stands now, so a verdict cannot
             # be applied to an iteration that moved on while it sat waiting.
-            run_version=run.version if run is not None else None,
+            #
+            # ``-1`` and never ``None`` when the run is gone: ``None`` means
+            # "do not check", so a missing run silently *skipped* the one
+            # binding this path supplies. The web path already spells this out;
+            # the CLI had the bug its comment describes avoiding.
+            run_version=run.version if run is not None else -1,
             grant=grant,
         )
     except (ApprovalRefused, ConcurrentTransition) as exc:

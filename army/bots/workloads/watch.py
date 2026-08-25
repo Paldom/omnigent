@@ -120,7 +120,8 @@ class WatchWorkload:
         # next one cannot forget it — which is exactly what happened to the
         # research workload, leaving nine of ten bots unable to browse with
         # nothing anywhere saying so.
-        session = omni.create_session(
+        session = omni.open_once(
+            run.id,
             omni.resolve_agent(self.agent),
             title=f"watch: {self.url[:60]}",
             workspace=str(self.workspace),

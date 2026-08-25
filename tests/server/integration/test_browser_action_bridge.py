@@ -509,6 +509,9 @@ async def test_a_labelled_session_goes_to_the_gateway_not_the_desktop(
         def hold(self, profile: str, *, seconds: float) -> None:
             raise AssertionError("nobody is holding this wheel")
 
+        def release(self, profile: str) -> None:
+            return None
+
         async def perform(self, profile: str, action: str, args: dict[str, Any]) -> dict[str, Any]:
             performed.append((profile, action, args))
             return {"ok": True, "url": args.get("url"), "title": "Fee Schedule"}

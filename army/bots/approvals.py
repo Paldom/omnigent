@@ -408,10 +408,39 @@ class ApprovalStore:
         """
         Refuse a verdict whose question has changed underneath it.
 
+        Each binding is skipped when the caller passes ``None``, which is the
+        trap: every production caller supplied only ``run_version``, so the
+        action hash and the policy version — the two bindings this system
+        advertises as what makes its approvals better than resume-an-interrupt
+        HITL — were never actually compared against anything. A check whose
+        default is "do not check" is a check nobody notices is off.
+
+        So an unsupplied binding is now *recorded* rather than silently
+        skipped. Callers that genuinely have nothing to compare against pass
+        :data:`UNCHECKED` and say why; the audit trail then shows an approval
+        whose binding was not verified, which is a fact an incident review
+        needs and a comment in the source cannot provide.
+
         :raises ApprovalRefused: Naming the binding that failed, so the
             operator can see whether the plan changed, the policy changed, or
             the run moved on.
         """
+        unverified = [
+            name
+            for name, supplied in (
+                ("action", verb is not None and parameters is not None),
+                ("policy", policy_version is not None),
+                ("run", run_version is not None),
+            )
+            if not supplied
+        ]
+        if unverified:
+            _logger.warning(
+                "approval %s approved with %s binding(s) unverified: %s",
+                request.id[:12],
+                len(unverified),
+                ", ".join(unverified),
+            )
         if verb is not None and parameters is not None:
             current = digest(verb, parameters)
             if current != request.action_hash:

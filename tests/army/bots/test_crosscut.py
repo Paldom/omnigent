@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from unittest.mock import patch
 
 import pytest
 
@@ -810,3 +811,54 @@ def test_a_bot_with_no_browser_profile_gets_no_label(store: Store, bots: BotStor
 
     assert omni.labelled, "the bot never opened a session"
     assert all("omnigent.browser.profile" not in labels for labels in omni.labelled)
+
+
+def test_a_body_is_briefed_on_who_it_is_and_where_it_got_to(store: Store, bots: BotStore) -> None:
+    """`memory.assemble` had no caller, so the memory was a claim, not a feature.
+
+    Its own docstring says that without it "there is no memory, just a persona
+    re-read from a row" — and nothing called it, because every workload writes
+    its own brief and none of them asked. That is the same failure as the
+    browser label, so it has the same fix: the framework prefaces the body, and
+    a workload cannot forget what it never had to remember.
+    """
+    omni = FakeOmni()
+    fleet = BotSupervisor(
+        store,
+        omni,
+        bots,
+        StubRegistry({HEARTBEAT: _OpensASession(outcome="work_done")}),
+        messages=MessageStore(bots),
+    )
+    activate(
+        bots,
+        make_bot("scout", workload=HEARTBEAT, wake=_continuous()),
+        now=NOW,
+    )
+
+    for offset in range(3):
+        fleet.fleet_tick(now=NOW + offset)
+
+    assert omni.preamble, "the body was dispatched with no briefing at all"
+    assert "a standing role" in omni.preamble, "it should know who it is"  # make_bot's persona
+
+
+def test_a_briefing_that_cannot_be_built_still_dispatches(store: Store, bots: BotStore) -> None:
+    """A thin brief beats no body: the workload's own brief carries the work."""
+    omni = FakeOmni()
+    fleet = BotSupervisor(
+        store,
+        omni,
+        bots,
+        StubRegistry({HEARTBEAT: _OpensASession(outcome="work_done")}),
+        messages=MessageStore(bots),
+    )
+    bot = activate(bots, make_bot("scout", workload=HEARTBEAT, wake=_continuous()), now=NOW)
+
+    with patch("army.bots.supervisor.assemble", side_effect=RuntimeError("no revision")):
+        for offset in range(3):
+            fleet.fleet_tick(now=NOW + offset)
+
+    assert omni.sessions, "a broken briefing must not stop the bot working"
+    assert store.list_runs(), "and the run should exist"
+    assert bot.slug == "scout"

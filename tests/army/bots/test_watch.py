@@ -276,3 +276,53 @@ def test_the_workspace_is_made_before_the_session_opens(tmp_path: Any) -> None:
     workload.dispatch(_run(), FakeOmni())
 
     assert workspace.is_dir()
+
+
+def test_a_crash_before_collecting_does_not_open_a_second_session(tmp_path: Any) -> None:
+    """The recovery story is only true for the states after DISPATCHING.
+
+    `dispatch` creates a session; if the process dies before the run reaches
+    COLLECTING, the next tick calls `dispatch` again — orphaning the first
+    session and paying for a second agent turn on the same work. `find_session`
+    was written for exactly this and only a demo workload ever called it, so
+    both real workloads had the bug.
+    """
+    omni = FakeOmni()
+    run = _run(outstanding=[])
+    workload = _workload(tmp_path)
+
+    first = workload.dispatch(run, omni)
+    second = workload.dispatch(run, omni)
+
+    assert first == second, "the retry must pick the session back up"
+    assert len(omni.sessions) == 1
+
+
+def test_two_different_runs_get_two_sessions(tmp_path: Any) -> None:
+    """A watcher's title is the page it watches, identical every iteration.
+
+    Deduplicating on that alone would hand a bot last week's session and never
+    open a new one — so the key carries the run.
+    """
+    omni = FakeOmni()
+    workload = _workload(tmp_path)
+
+    monday = workload.dispatch(_run(), omni)
+    tuesday = workload.dispatch(
+        Run(
+            id="b" * 32,
+            workflow="w",
+            state=RunState.DISPATCHING,
+            version=1,
+            attempt=1,
+            created_at=NOW,
+            updated_at=NOW,
+            payload={},
+            artifacts={},
+            outstanding=[],
+            bot_id="bot",
+        ),
+        omni,
+    )
+
+    assert monday != tuesday

@@ -187,7 +187,8 @@ class ResearchWorkload:
         """
         question = str(run.payload.get("question", ""))
         said = [str(line) for line in run.payload.get("said") or []]
-        session = omni.create_session(
+        session = omni.open_once(
+            run.id,
             omni.resolve_agent(self.agent),
             title=f"research: {question[:60]}",
             workspace=str(self.repo),

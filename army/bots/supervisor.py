@@ -26,6 +26,7 @@ from typing import Any
 from army.bots.approvals import ITERATION_GATE, ApprovalRequest, ApprovalStore
 from army.bots.budget import BudgetExhausted, BudgetStore
 from army.bots.isolation import sandbox_for
+from army.bots.memory import assemble
 from army.bots.messages import MessageKind, MessageStore
 from army.bots.model import Bot, BotStatus, IllegalBotMove, RunOutcome, WakeKind
 from army.bots.precondition import PreconditionRegistry, UnknownPrecondition
@@ -195,6 +196,43 @@ class BotSupervisor(Supervisor):
             if bot is not None:
                 self._pause(bot, now=now, reason=str(exc))
             return failed
+
+    def _omni_for(self, run: Run) -> OmniClient:
+        """
+        The client a workload gets, carrying this run's labels *and* its brief.
+
+        Who the bot is, where it got to and what it was told, assembled from
+        the pinned revision and the rows, prepended to the first message of the
+        session by the client rather than by each workload.
+
+        ``memory.assemble`` had no caller at all before this — 269 lines whose
+        own docstring says that without them "there is no memory, just a
+        persona re-read from a row". It was dead because every workload writes
+        its own brief and none of them asked for it, which is the same failure
+        as the browser label: a thing every body needs is a thing some workload
+        will forget. So it goes where forgetting is not an option.
+
+        :param run: The run about to dispatch.
+        :returns: The client.
+        """
+        client = super()._omni_for(run)
+        bot = self.bots.get(run.bot_id or "")
+        if bot is None:
+            return client
+        try:
+            briefing = assemble(
+                bot,
+                self.bots,
+                self.messages,
+                now=int(time.time()),
+                revision_id=run.revision_id,
+            ).render()
+        except Exception:  # noqa: BLE001 - a brief can fail in any way
+            # A body with a thin brief beats no body: the workload's own brief
+            # still carries the actual work.
+            _logger.warning("could not brief %s; dispatching anyway", bot.slug, exc_info=True)
+            return client
+        return client.with_briefing(briefing) if briefing else client
 
     def _workload_for(self, run: Run) -> Workload:
         """
