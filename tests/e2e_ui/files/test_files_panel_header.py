@@ -1,16 +1,12 @@
-"""E2E: the Files rail "Working folder" header — never a collapse toggle, and
-a browse control when the session has somewhere else to go.
+"""E2E: the Files rail path/action header and browse controls.
 
 The desktop Workspace rail renders ``FilesPanel`` in its ``frameless``
 (inline) mode. Three behaviours are pinned here:
 
-1. The header never collapses the panel. The file list is the whole point of
-   the panel, so there is nothing to collapse to. This guards against
-   reintroducing the collapse chevron: the header once doubled as a collapse
-   toggle carrying ``aria-expanded``, which made no sense here. A session with
-   nowhere else to browse (no bound host) keeps the plain, unclickable label.
-2. The header's eye shows hidden files by default and reads as state: plain
-   while dot-prefixed entries are listed, slashed once they are filtered out.
+1. The header uses the working-directory breadcrumb itself instead of a
+   redundant "Working folder" title, and keeps Copy + Refresh actions visible.
+2. The hidden-files icon previews its action: slashed eye to hide currently
+   visible dotfiles, plain eye to reveal them again.
 3. When the session IS host-bound and unconfined, the working-folder path
    becomes a button that opens the workspace directory browser, and picking a
    directory re-roots the file tree there — through the real server, runner,
@@ -29,20 +25,19 @@ import re
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import pytest
 from playwright.sync_api import Page, Route, expect
 
-from tests.e2e_ui.conftest import open_right_rail
+from tests.e2e_ui.conftest import fetch_with_retry, open_right_rail
 
 
-def test_files_rail_working_folder_header_is_a_static_label(
+def test_files_rail_header_uses_path_and_actions_without_redundant_title(
     page: Page,
     seeded_session: tuple[str, str],
 ) -> None:
-    """The rail's "Working folder" header is a static label (no toggle button),
-    and the file list is always visible."""
+    """The header is the path plus file actions; the tree stays visible."""
     base_url, session_id = seeded_session
     page.goto(f"{base_url}/c/{session_id}")
 
@@ -57,11 +52,13 @@ def test_files_rail_working_folder_header_is_a_static_label(
     # not depend on the remembered tab from a prior session.
     rail.get_by_role("tab", name=re.compile("^Files")).click()
 
-    # The header text is present, but it is NOT a button — there is no collapse
-    # toggle. substring-matching "Working folder" tolerates the trailing
-    # working-directory basename the header also renders.
-    expect(rail.get_by_text("Working folder")).to_be_visible(timeout=30_000)
-    expect(rail.get_by_role("button", name=re.compile("Working folder"))).to_have_count(0)
+    env = page.request.get(f"{base_url}/v1/sessions/{session_id}/resources/environments/default")
+    assert env.status == 200, env.text()
+    root_name = Path(env.json()["metadata"]["root"]).name
+    expect(rail.get_by_text(root_name, exact=True)).to_be_visible(timeout=30_000)
+    expect(rail.get_by_text("Working folder", exact=True)).to_have_count(0)
+    expect(rail.get_by_role("button", name="Copy folder path")).to_be_visible()
+    expect(rail.get_by_role("button", name="Refresh files")).to_be_visible()
 
     # The content is always shown: the Files (tree) search box is visible with
     # no toggle needed. Scope is the rail tab now (Files vs Changes), not an
@@ -74,9 +71,7 @@ def test_files_rail_shows_hidden_files_until_the_eye_is_clicked(
     seeded_session: tuple[str, str],
     request: pytest.FixtureRequest,
 ) -> None:
-    """Dot-prefixed entries are listed without touching the eye, and the eye
-    reports the current state rather than the pending action: unslashed while
-    hidden files are visible, slashed once they are filtered out.
+    """Dot-prefixed entries are listed by default; the eye previews its action.
 
     Agents write to ``.claude/``, ``.github/`` and friends constantly, so a
     workspace whose dotfiles are invisible by default hides much of what a
@@ -102,16 +97,15 @@ def test_files_rail_shows_hidden_files_until_the_eye_is_clicked(
     row = rail.get_by_role("button", name=".hidden-demo/", exact=True)
     expect(row).to_be_visible(timeout=30_000)
 
-    # Visible state → plain eye. The class regex is anchored on whitespace
-    # because "lucide-eye" is a prefix of "lucide-eye-off".
+    # Hidden files are visible, so the pending action is Hide → slashed eye.
     toggle = rail.get_by_role("button", name="Hide hidden files")
-    expect(toggle.locator("svg")).to_have_class(re.compile(r"(^|\s)lucide-eye(\s|$)"))
+    expect(toggle.locator("svg")).to_have_class(re.compile(r"(^|\s)lucide-eye-off(\s|$)"))
 
     toggle.click()
 
     expect(row).to_have_count(0)
     expect(rail.get_by_role("button", name="Show hidden files").locator("svg")).to_have_class(
-        re.compile(r"(^|\s)lucide-eye-off(\s|$)")
+        re.compile(r"(^|\s)lucide-eye(\s|$)")
     )
 
 
@@ -176,7 +170,7 @@ _FAKE_HOST_ID = "host_files_panel_browse"
 def _drop_routes(page: Page) -> Iterator[None]:
     """Drop this module's route handlers before the page closes.
 
-    A handler that calls ``route.fetch()`` as the page tears down raises
+    A handler that replays upstream as the page tears down raises
     ``TargetClosedError``, which would surface as an error in the NEXT test's
     setup. Mirrors the same guard in ``sessions/test_host_badge.py``.
 
@@ -208,7 +202,7 @@ def _bind_host_with_listing(page: Page, session_id: str, *, entry: Path) -> None
         if request.method != "GET" or urlparse(request.url).path != f"/v1/sessions/{session_id}":
             route.continue_()
             return
-        response = route.fetch()
+        response = fetch_with_retry(route)
         payload = response.json()
         payload["host_id"] = _FAKE_HOST_ID
         route.fulfill(
@@ -300,6 +294,7 @@ def test_files_panel_browses_to_a_directory_outside_the_workspace(
     picker = page.get_by_test_id("workspace-picker")
     expect(picker).to_be_visible(timeout=15_000)
     picker.get_by_test_id(f"workspace-picker-entry-{outside.name}").click()
+    picker.get_by_test_id("workspace-picker-select").click()
 
     # Re-rooted: the header names the new directory and the tree lists its
     # contents, served by the real runner from outside the workspace.
@@ -315,9 +310,22 @@ def test_files_panel_browses_to_a_directory_outside_the_workspace(
     expect(rail.get_by_text("sentinel.txt")).to_be_visible(timeout=30_000)
     rail.get_by_role("searchbox", name="Search all files").fill("")
 
+    # Opening a file swaps the panel for the viewer (unmounting it); closing
+    # the viewer must land back in THIS directory, not snap to the workspace
+    # root. The header path button only exists while the panel is mounted, so
+    # it naming the outside directory again is the whole assertion.
+    rail.get_by_role("button", name=re.compile(r"sentinel\.txt")).first.click()
+    expect(rail.get_by_role("searchbox", name="Search all files")).to_have_count(0, timeout=30_000)
+    rail.get_by_role("button", name="Close sentinel.txt", exact=True).click()
+    expect(path_button).to_contain_text(outside.name, timeout=30_000)
+    expect(rail.get_by_role("button", name=re.compile(r"sentinel\.txt")).first).to_be_visible(
+        timeout=30_000
+    )
+
     # One click back to where the agent actually is.
     path_button.click()
     page.get_by_test_id("workspace-picker-workspace").click()
+    page.get_by_test_id("workspace-picker-select").click()
     expect(rail.get_by_text("sentinel.txt")).to_have_count(0, timeout=30_000)
 
 
@@ -365,3 +373,101 @@ def test_opening_the_directory_browser_does_not_flash_a_header_tooltip(
     # A deliberate hover is still answered.
     up.hover()
     expect(page.get_by_text("Up one level", exact=True)).to_be_visible(timeout=15_000)
+
+
+def _simulate_frontdoor_slash_merge(page: Page, session_id: str) -> None:
+    """Rewrite the session's filesystem/search requests the way the Databricks
+    Apps front door does, so a local server (which has no such proxy) exercises
+    the exact production condition.
+
+    That front door percent-decodes ``%2F`` and then merges any resulting
+    ``//`` in the path to a single ``/`` — ``//health`` 301-redirects to
+    ``/health`` — while preserving the query string across the merge. This
+    handler reproduces both: it decodes ``%2F`` and collapses repeated slashes
+    in the path, leaving the query untouched.
+
+    The old wire form marked an absolute browse with a leading ``%2F`` in the
+    ``{path}`` segment; once merged that leading slash is gone, so the server
+    reads ``/Users/me`` back as a workspace-relative ``Users/me`` and lists a
+    nonexistent path — an empty tree. The fix carries the base out of band
+    (``?base=host``) and sends the path with literal slashes, so nothing in the
+    path merges and the query survives.
+
+    Only the session's own filesystem/search endpoints are rewritten. The host
+    picker endpoint (``/v1/hosts/{id}/filesystem``) already uses the
+    slash-merge-safe form, so leaving it alone keeps the picker (the "paths
+    show in the dropdown" half of the bug) working, exactly as in production.
+
+    :param page: Playwright page, before navigation.
+    :param session_id: Session whose filesystem requests to rewrite.
+    """
+    fs_re = re.compile(
+        rf"/v1/sessions/{re.escape(session_id)}/resources/environments/[^/]+/(filesystem|search)"
+    )
+
+    def _merge(route: Route) -> None:
+        parts = urlparse(route.request.url)
+        decoded = parts.path.replace("%2F", "/").replace("%2f", "/")
+        merged = re.sub(r"/{2,}", "/", decoded)
+        if merged == parts.path:
+            route.continue_()
+            return
+        route.continue_(url=urlunparse(parts._replace(path=merged)))
+
+    page.route(fs_re, _merge)
+
+
+def test_absolute_browse_survives_a_slash_merging_proxy(
+    page: Page,
+    seeded_session: tuple[str, str],
+    tmp_path: Path,
+    _drop_routes: None,
+) -> None:
+    """Browsing outside the workspace shows files even behind a proxy that
+    merges the encoded slashes marking an absolute path.
+
+    Regression test for the deployed file browser showing "No files in
+    workspace" for any directory above/outside the working folder: the
+    Databricks Apps front door merges the ``//`` that the old ``%2F`` wire form
+    decodes to, so the absolute path arrived at the server looking
+    workspace-relative and listed nothing — even though the picker dropdown
+    (a different, merge-safe endpoint) showed the very same directories.
+
+    Drives the real re-root flow with a handler that reproduces the front
+    door's path normalization on the session's filesystem/search requests. The
+    re-rooted tree is served by the real runner off the real filesystem, so a
+    green assertion means the absolute browse survived the merge end to end.
+    """
+    base_url, session_id = seeded_session
+
+    outside = tmp_path / "outside-workspace"
+    outside.mkdir()
+    (outside / "sentinel.txt").write_text("proof the tree re-rooted behind the proxy\n")
+
+    _bind_host_with_listing(page, session_id, entry=outside)
+    _simulate_frontdoor_slash_merge(page, session_id)
+    page.goto(f"{base_url}/c/{session_id}")
+
+    open_right_rail(page)
+    rail = page.get_by_role("complementary", name="Workspace")
+    rail.get_by_role("tab", name=re.compile("^Files")).click()
+
+    path_button = rail.get_by_test_id("browse-location-path")
+    expect(path_button).to_be_visible(timeout=30_000)
+    path_button.click()
+
+    picker = page.get_by_test_id("workspace-picker")
+    expect(picker).to_be_visible(timeout=15_000)
+    picker.get_by_test_id(f"workspace-picker-entry-{outside.name}").click()
+    picker.get_by_test_id("workspace-picker-select").click()
+
+    # Re-rooted through the proxy: the tree lists the outside directory's real
+    # contents rather than collapsing to an empty "No files in workspace".
+    expect(path_button).to_contain_text(outside.name, timeout=30_000)
+    expect(rail.get_by_text("sentinel.txt")).to_be_visible(timeout=30_000)
+    expect(rail.get_by_text("No files in workspace")).to_have_count(0)
+
+    # Search of the absolute location survives the same merge.
+    page.keyboard.press("Escape")
+    rail.get_by_role("searchbox", name="Search all files").fill("sentinel")
+    expect(rail.get_by_text("sentinel.txt")).to_be_visible(timeout=30_000)

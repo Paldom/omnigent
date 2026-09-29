@@ -1,7 +1,7 @@
 """Browser e2e for the sidebar's owner-vs-not row gating and scope filters.
 
-This is the end-to-end companion to the mocked ``Sidebar`` unit tests, and the
-coverage the ``E2E UI Required`` gate asks for: the sidebar derives ownership
+This is the end-to-end companion to the mocked ``Sidebar`` unit tests.
+The sidebar derives ownership
 (and every owner-only row action) from the session's ``owner`` — the creator's
 user id carried on each list row — NOT from an effective ``permission_level``.
 The behavior under test:
@@ -111,7 +111,7 @@ def test_owner_sees_session_under_my_sessions_with_enabled_actions(
         page = ctx.new_page()
         page.goto(f"{server.public_url}/c/{sid}")
 
-        # Owned → shows under the default "All sessions" filter.
+        # Owned → shows under the default "My sessions" filter.
         expect(page.locator(_FILTER)).to_be_visible(timeout=30_000)
         expect(_row(page, sid)).to_be_visible(timeout=30_000)
 
@@ -154,12 +154,9 @@ def test_shared_viewer_sees_session_under_shared_filter_with_owner_only_actions(
         page = ctx.new_page()
         page.goto(f"{server.public_url}/c/{sid}")
 
-        # The shared session is not the viewer's own, but "All sessions" (the
-        # default filter) includes it, so it is visible up front...
+        # The shared session is not the viewer's own, so the default "My
+        # sessions" filter hides it; it shows under the "Shared sessions" filter.
         expect(page.locator(_FILTER)).to_be_visible(timeout=30_000)
-        expect(_row(page, sid)).to_be_visible(timeout=30_000)
-
-        # ...and it stays visible under the "Shared sessions" filter.
         page.locator(_FILTER).click()
         page.locator(_FILTER_SHARED).click()
         expect(_row(page, sid)).to_be_visible(timeout=30_000)

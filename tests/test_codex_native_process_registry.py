@@ -2,15 +2,29 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
-from omnigent import codex_native_process_registry as registry
+from omnigent.harnesses.codex_native import process_registry as registry
 
 fcntl = pytest.importorskip("fcntl")
+_REAL_PROCESS_START_IDENTITY = registry._process_start_identity
+_REAL_PROCESS_GROUP_MATCHES_ENTRY = registry._process_group_matches_entry
+
+
+@pytest.fixture(autouse=True)
+def _fake_processes_have_no_kernel_identity(monkeypatch) -> None:
+    """Keep synthetic PID fixtures independent of processes on the test host."""
+    monkeypatch.setattr(registry, "_process_start_identity", lambda _pid: None)
+    monkeypatch.setattr(registry, "_process_group_matches_entry", lambda _entry: True)
 
 
 def _registry_payload(path: Path) -> list[dict[str, object]]:
@@ -95,6 +109,142 @@ def test_reconciliation_skips_pid_reuse_without_matching_tag(tmp_path: Path, mon
 
     assert killed == []
     assert _registry_payload(path) == []
+
+
+def test_reconciliation_uses_process_start_identity_after_argv0_is_lost(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A matching process birth identity survives the Codex npm shim."""
+    path = tmp_path / "registry.json"
+    monkeypatch.setattr(registry, "_process_start_identity", lambda _pid: "linux:boot:123")
+    registry.register_codex_native_process(
+        pid=123,
+        pgid=456,
+        session_tag="tag-123",
+        owner_lock_path=None,
+        registry_path=path,
+    )
+    killed: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(registry, "_process_cmdline", lambda _pid: "codex app-server")
+    monkeypatch.setattr(registry.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+
+    registry.reconcile_codex_native_process_registry(registry_path=path)
+
+    assert killed == [(456, signal.SIGTERM)]
+    assert _registry_payload(path) == []
+
+
+def test_reconciliation_skips_reused_pid_with_different_process_start_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A recycled PID cannot make reconciliation kill the replacement process."""
+    path = tmp_path / "registry.json"
+    identities = iter(("linux:boot:123", "linux:boot:456"))
+    monkeypatch.setattr(registry, "_process_start_identity", lambda _pid: next(identities))
+    registry.register_codex_native_process(
+        pid=123,
+        pgid=456,
+        session_tag="tag-123",
+        owner_lock_path=None,
+        registry_path=path,
+    )
+    killed: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(registry.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+
+    registry.reconcile_codex_native_process_registry(registry_path=path)
+
+    assert killed == []
+    assert _registry_payload(path) == []
+
+
+def test_reconciliation_retains_alive_process_when_identity_is_unreadable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A transient identity read failure must not discard a live child."""
+    path = tmp_path / "registry.json"
+    monkeypatch.setattr(registry, "_process_start_identity", lambda _pid: "linux:boot:123")
+    registry.register_codex_native_process(
+        pid=123,
+        pgid=456,
+        session_tag="tag-123",
+        owner_lock_path=None,
+        registry_path=path,
+    )
+    monkeypatch.setattr(registry, "_process_start_identity", lambda _pid: None)
+    monkeypatch.setattr(registry, "_pid_alive", lambda _pid: True)
+    killed: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(registry.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+
+    registry.reconcile_codex_native_process_registry(registry_path=path)
+
+    assert killed == []
+    assert _registry_payload(path)[0]["process_start_identity"] == "linux:boot:123"
+
+
+def test_reconciliation_retains_process_when_pgid_changed(tmp_path: Path, monkeypatch) -> None:
+    """A matching PID is not signaled through a stale process-group id."""
+    path = tmp_path / "registry.json"
+    monkeypatch.setattr(registry, "_process_start_identity", lambda _pid: "linux:boot:123")
+    registry.register_codex_native_process(
+        pid=123,
+        pgid=456,
+        session_tag="tag-123",
+        owner_lock_path=None,
+        registry_path=path,
+    )
+    monkeypatch.setattr(registry, "_process_group_matches_entry", lambda _entry: False)
+    killed: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(registry.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+
+    registry.reconcile_codex_native_process_registry(registry_path=path)
+
+    assert killed == []
+    assert _registry_payload(path)[0]["pgid"] == 456
+
+
+def test_reconciliation_reaps_real_process_after_argv0_marker_is_lost(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Kernel identity reaps a live process whose command line has no tag."""
+    monkeypatch.setattr(registry, "_process_start_identity", _REAL_PROCESS_START_IDENTITY)
+    monkeypatch.setattr(
+        registry,
+        "_process_group_matches_entry",
+        _REAL_PROCESS_GROUP_MATCHES_ENTRY,
+    )
+    path = tmp_path / "registry.json"
+    sleeper = "import time; time.sleep(300)"
+    wrapper = (
+        "import os,sys,time; time.sleep(0.2); "
+        f"os.execv(sys.executable, [sys.executable, '-c', {sleeper!r}, 'app-server'])"
+    )
+    victim = subprocess.Popen(
+        ["python omnigent_crash_teardown_tag=lost-after-exec", "-c", wrapper],
+        executable=sys.executable,
+        start_new_session=True,
+    )
+    try:
+        registry.register_codex_native_process(
+            pid=victim.pid,
+            pgid=os.getpgid(victim.pid),
+            session_tag="marker-lost-by-shim",
+            owner_lock_path=None,
+            registry_path=path,
+        )
+        deadline = time.monotonic() + 5.0
+        while "omnigent_crash_teardown_tag" in registry._process_cmdline(victim.pid):
+            assert time.monotonic() < deadline, "wrapper did not exec the marker-free process"
+            time.sleep(0.01)
+
+        registry.reconcile_codex_native_process_registry(registry_path=path)
+
+        victim.wait(timeout=5.0)
+        assert _registry_payload(path) == []
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            victim.kill()
+        with contextlib.suppress(Exception):
+            victim.wait(timeout=5.0)
 
 
 def test_reconciliation_skips_live_sibling_when_owner_lock_is_held(
@@ -245,3 +395,41 @@ def test_registry_lock_serializes_read_modify_write(tmp_path: Path) -> None:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         finally:
             registry.os.close(fd)
+
+
+def test_reap_state_dir_kills_matching_app_server_and_spares_others(tmp_path: Path) -> None:
+    """
+    Reaping by state dir kills only processes carrying dir + "app-server".
+
+    The stale-holder incident shape: an app-server from a dead runner still
+    runs with the session state dir in its command line. A process carrying
+    the dir WITHOUT the "app-server" marker (e.g. the pytest process's own
+    tree) must survive.
+    """
+    state_dir = tmp_path / "deadbeefdeadbeefdeadbeefdeadbeef"
+    sleeper = "import time; time.sleep(300)"
+    victim = subprocess.Popen(
+        [sys.executable, "-c", sleeper, str(state_dir), "app-server"],
+        start_new_session=True,
+    )
+    bystander = subprocess.Popen(
+        [sys.executable, "-c", sleeper, str(state_dir)],
+        start_new_session=True,
+    )
+    try:
+        reaped = registry.reap_codex_native_processes_for_state_dir(state_dir, grace_s=1.0)
+        assert reaped == 1, f"expected exactly the victim to match, got {reaped}"
+        # SIGTERM (or the SIGKILL escalation) must actually end the process.
+        victim.wait(timeout=5.0)
+        assert bystander.poll() is None, "process without the app-server marker was killed"
+    finally:
+        for proc in (victim, bystander):
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=5.0)
+
+
+def test_reap_state_dir_without_matches_is_a_noop(tmp_path: Path) -> None:
+    """A state dir no live process references reaps nothing."""
+    assert registry.reap_codex_native_processes_for_state_dir(tmp_path / "no-match") == 0
